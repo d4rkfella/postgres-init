@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/d4rkfella/postgres-init"
 )
 
 // Config holds the database configuration
