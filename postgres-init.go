@@ -147,7 +147,7 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	// If the user doesn't exist, create the user
 	if exists != 1 {
 		colorPrint(fmt.Sprintf("👤 Creating user %s...", cfg.User), "green")
-		sql := fmt.Sprintf(`CREATE ROLE "%s" LOGIN PASSWORD '%s'`, cfg.User, cfg.UserPass)
+		sql := fmt.Sprintf(`CREATE ROLE "%s" LOGIN ENCRYPTED PASSWORD '%s'`, cfg.User, cfg.UserPass)
 		
 		// Add user flags if any
 		if cfg.UserFlags != "" {
