@@ -185,14 +185,14 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 }
 
 func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
-	var exists bool
+	var exists int // Change from bool to int
 	err := pool.QueryRow(ctx, "SELECT 1 FROM pg_database WHERE datname = $1", cfg.DBName).Scan(&exists)
 
 	if err != nil && !strings.Contains(err.Error(), "no rows in result set") {
 		return fmt.Errorf("⚠️ Failed to check database existence: %w", err)
 	}
 
-	if !exists {
+	if exists != 1 { // Check if the value returned is 1, meaning the database exists
 		colorPrint(fmt.Sprintf("📦 Creating database %s...", cfg.DBName), "green")
 		if _, err = pool.Exec(ctx, "CREATE DATABASE "+cfg.DBName+" OWNER "+cfg.User); err != nil {
 			return fmt.Errorf("❌ Failed to create database: %w", err)
