@@ -137,7 +137,7 @@ func waitForPostgres(ctx context.Context, pool *pgxpool.Pool, cfg Config) {
 	}
 }
 
-func CreateUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
+func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	var exists int
 	err := pool.QueryRow(ctx, "SELECT 1 FROM pg_roles WHERE rolname = $1", cfg.User).Scan(&exists)
 
@@ -193,7 +193,7 @@ func CreateUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	return nil
 }
 
-func CreateDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
+func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	var exists int
 	err := pool.QueryRow(ctx, "SELECT 1 FROM pg_database WHERE datname = $1", cfg.DBName).Scan(&exists)
 
