@@ -36,11 +36,11 @@ func main() {
 
 	waitForPostgres(ctx, pool, cfg)
 
-	if err := CreateUser(ctx, pool, cfg); err != nil {
+	if err := createUser(ctx, pool, cfg); err != nil {
 		log.Fatal(err)
 	}
 
-	if err := CreateDatabase(ctx, pool, cfg); err != nil {
+	if err := createDatabase(ctx, pool, cfg); err != nil {
 		log.Fatal(err)
 	}
 
