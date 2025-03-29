@@ -1,0 +1,78 @@
+name: Build Docker Image
+
+on: 
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * *"
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+      packages: write
+      contents: read
+      security-events: write
+    
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - name: Generate snapshot date
+        id: snapshot-date
+        run: |
+          echo "epoch=$(date -u +%s)" >> $GITHUB_OUTPUT
+        shell: bash
+            
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 #v4.2.2
+
+      - name: Extract version
+        shell: bash
+        run: |
+          LATEST_VERSION=$(
+              aws s3api list-objects-v2 \
+              --bucket "$BUCKET" \
+              --endpoint-url "$AWS_ENDPOINT_URL" \
+              --query "Contents[?contains(Key, '$PACKAGE-')].Key" \
+              --output text | \
+              grep -Eo "$PACKAGE-[0-9]+\.[0-9]+\.[0-9]+" | \
+              sort -Vu | \
+              tail -n 1 | \
+              sed "s/$PACKAGE-//"
+          )
+          echo FULL_VERSION=$LATEST_VERSION >> $GITHUB_ENV
+          echo MAJOR_VERSION=$(echo "$LATEST_VERSION" | cut -d. -f1) >> $GITHUB_ENV
+          echo MAJOR_MINOR_VERSION=$(echo "$LATEST_VERSION" | cut -d. -f1-2) >> $GITHUB_ENV
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_ENDPOINT_URL: ${{ secrets.AWS_ENDPOINT_URL }}
+          PACKAGE: postgres-init
+          BUCKET: packages
+  
+      - uses: d4rkfella/actions/apko-snapshot@main
+        id: apko
+        with:
+          source-date-epoch: ${{ steps.snapshot-date.outputs.epoch }}
+          additional-tags: ${{ env.FULL_VERSION }},${{ env.MAJOR_VERSION }},${{ env.MAJOR_MINOR_VERSION }}
+          archs: amd64
+          slsa-attest: "true"
+          sbom-attest: "true"
+          build-repository-append: https://packages.darkfellanetwork.com
+          keyring-append: https://packages.darkfellanetwork.com/melange.rsa.pub
+          annotations: org.opencontainers.image.url:https://ghcr.io/${{ github.repository_owner }}/postgres-init,org.opencontainers.image.title:postgres-init,org.opencontainers.image.version:${{ env.FULL_VERSION }},org.opencontainers.image.revision:${{ github.sha }},org.opencontainers.image.vendor:${{ github.repository_owner }}
+  
+      - uses: d4rkfella/actions/vul-scans@main
+        id: scans
+        with:
+          RUN_SNYK: false
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          image: ${{ steps.apko.outputs.digest }}
+          UPLOAD_GITHUB_CODE: true
