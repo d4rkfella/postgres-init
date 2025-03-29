@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,7 +19,7 @@ type Config struct {
 	User        string
 	UserPass    string
 	DBName      string
-	Port        string
+	Port        int      // Changed from string to int
 	UserFlags   string
 	InitSQLDir  string
 }
@@ -48,6 +49,12 @@ func main() {
 }
 
 func loadConfig() Config {
+	portStr := getEnvWithDefault("INIT_POSTGRES_PORT", "5432")
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		log.Fatalf("Invalid port number: %v", err)
+	}
+
 	cfg := Config{
 		Host:       mustGetEnv("INIT_POSTGRES_HOST"),
 		SuperUser:  getEnvWithDefault("INIT_POSTGRES_SUPER_USER", "postgres"),
@@ -55,7 +62,7 @@ func loadConfig() Config {
 		User:       mustGetEnv("INIT_POSTGRES_USER"),
 		UserPass:   mustGetEnv("INIT_POSTGRES_PASS"),
 		DBName:     mustGetEnv("INIT_POSTGRES_DBNAME"),
-		Port:       getEnvWithDefault("INIT_POSTGRES_PORT", "5432"),
+		Port:       port,
 		UserFlags:  os.Getenv("INIT_POSTGRES_USER_FLAGS"),
 		InitSQLDir: getEnvWithDefault("INIT_POSTGRES_INIT_SQL_DIR", "/initdb"),
 	}
@@ -85,7 +92,7 @@ func connectPostgres(ctx context.Context, cfg Config) *pgxpool.Pool {
 	}
 
 	config.ConnConfig.Host = cfg.Host
-	config.ConnConfig.Port = cfg.Port
+	config.ConnConfig.Port = uint16(cfg.Port)
 	config.ConnConfig.User = cfg.SuperUser
 	config.ConnConfig.Password = cfg.SuperPass
 	config.ConnConfig.Database = cfg.SuperUser
@@ -115,11 +122,11 @@ func waitForPostgres(ctx context.Context, pool *pgxpool.Pool, cfg Config) {
 
 		err := pool.Ping(ctx)
 		if err == nil {
-			colorPrint(fmt.Sprintf("Connected to PostgreSQL at %s:%s", cfg.Host, cfg.Port), "green")
+			colorPrint(fmt.Sprintf("Connected to PostgreSQL at %s:%d", cfg.Host, cfg.Port), "green")
 			break
 		}
 
-		colorPrint(fmt.Sprintf("Waiting for Host '%s' on port '%s'...", cfg.Host, cfg.Port), "yellow")
+		colorPrint(fmt.Sprintf("Waiting for Host '%s' on port '%d'...", cfg.Host, cfg.Port), "yellow")
 		time.Sleep(1 * time.Second)
 	}
 }
@@ -213,7 +220,7 @@ func executeInitScript(ctx context.Context, cfg Config, dbname, initFile string)
 	}
 
 	config.ConnConfig.Host = cfg.Host
-	config.ConnConfig.Port = cfg.Port
+	config.ConnConfig.Port = uint16(cfg.Port)
 	config.ConnConfig.User = cfg.SuperUser
 	config.ConnConfig.Password = cfg.SuperPass
 	config.ConnConfig.Database = dbname
