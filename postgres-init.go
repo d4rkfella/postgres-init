@@ -29,6 +29,10 @@ type Config struct {
 
 func main() {
 	cfg := loadConfig()
+	
+	// Only log the safe connection details
+	log.Printf("🔄 Connecting to PostgreSQL with host=%s, port=%d, user=%s, sslmode=%s", 
+		cfg.Host, cfg.Port, cfg.SuperUser, getEnvWithDefault("POSTGRES_SSL_MODE", "disable"))
 
 	ctx := context.Background()
 	pool := connectPostgres(ctx, cfg)
@@ -40,11 +44,15 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if err := createDatabase(ctx, pool, cfg); err != nil {
+	if err := updateUserPassword(ctx, pool, cfg); err != nil {
 		log.Fatal(err)
 	}
 
-	colorPrint("✅ Database initialization completed successfully!", "green")
+	if err := processDatabases(ctx, pool, cfg); err != nil {
+		log.Fatal(err)
+	}
+
+	colorPrint("Database initialization completed successfully", "green")
 }
 
 // LoadConfig reads environment variables
