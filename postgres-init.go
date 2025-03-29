@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/d4rkfella/postgres-init/main"
 )
 
 // Config holds the database configuration
@@ -36,11 +37,11 @@ func main() {
 
 	waitForPostgres(ctx, pool, cfg)
 
-	if err := createUser(ctx, pool, cfg); err != nil {
+	if err := CreateUser(ctx, pool, cfg); err != nil {
 		log.Fatal(err)
 	}
 
-	if err := createDatabase(ctx, pool, cfg); err != nil {
+	if err := CreateDatabase(ctx, pool, cfg); err != nil {
 		log.Fatal(err)
 	}
 
@@ -136,7 +137,7 @@ func waitForPostgres(ctx context.Context, pool *pgxpool.Pool, cfg Config) {
 	}
 }
 
-func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
+func CreateUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	var exists int
 	err := pool.QueryRow(ctx, "SELECT 1 FROM pg_roles WHERE rolname = $1", cfg.User).Scan(&exists)
 
@@ -192,7 +193,7 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	return nil
 }
 
-func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
+func CreateDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	var exists int
 	err := pool.QueryRow(ctx, "SELECT 1 FROM pg_database WHERE datname = $1", cfg.DBName).Scan(&exists)
 

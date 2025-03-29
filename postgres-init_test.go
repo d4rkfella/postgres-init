@@ -3,17 +3,21 @@ package main
 import (
 	"context"
 	"testing"
+
 	"github.com/pashagolub/pgxmock"
-	"github.com/stretchr/testify/assert"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestCreateUser(t *testing.T) {
-	// Create a mock database connection
-	mockPool, mock, err := pgxmock.CreateMockConnPool()
+	// Create a mock database connection using pgxmock.NewConn
+	mockConn, mock, err := pgxmock.NewConn()
 	if err != nil {
 		t.Fatalf("Failed to create mock database connection: %v", err)
 	}
-	defer mockPool.Close()
+	defer mockConn.Close()
+
+	// Set up a mock pool with the mock connection
+	mockPool := pgxpool.Pool(mockConn)
 
 	// Set expectations for the mock database query
 	mock.ExpectQuery(`SELECT 1 FROM pg_roles WHERE rolname = \$1`).
@@ -43,12 +47,15 @@ func TestCreateUser(t *testing.T) {
 }
 
 func TestCreateDatabase(t *testing.T) {
-	// Create a mock database connection
-	mockPool, mock, err := pgxmock.CreateMockConnPool()
+	// Create a mock database connection using pgxmock.NewConn
+	mockConn, mock, err := pgxmock.NewConn()
 	if err != nil {
 		t.Fatalf("Failed to create mock database connection: %v", err)
 	}
-	defer mockPool.Close()
+	defer mockConn.Close()
+
+	// Set up a mock pool with the mock connection
+	mockPool := pgxpool.Pool(mockConn)
 
 	// Set expectations for the mock database query
 	mock.ExpectQuery(`SELECT 1 FROM pg_database WHERE datname = \$1`).
