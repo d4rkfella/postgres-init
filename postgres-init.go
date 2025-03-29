@@ -30,10 +30,6 @@ type Config struct {
 func main() {
 	cfg := loadConfig()
 	
-	// Only log the safe connection details
-	log.Printf("🔄 Connecting to PostgreSQL with host=%s, port=%d, user=%s, sslmode=%s", 
-		cfg.Host, cfg.Port, cfg.SuperUser, getEnvWithDefault("POSTGRES_SSL_MODE", "disable"))
-
 	ctx := context.Background()
 	pool := connectPostgres(ctx, cfg)
 	defer pool.Close()
@@ -104,7 +100,8 @@ func connectPostgres(ctx context.Context, cfg Config) *pgxpool.Pool {
 		log.Fatalf("❌ SSL mode %s requires INIT_POSTGRES_SSLROOTCERT to be set", cfg.SSLMode)
 	}
 
-	log.Println("🔄 Connecting to PostgreSQL with:", connStr)
+	log.Printf("🔄 Connecting to PostgreSQL with host=%s, port=%d, user=%s, sslmode=%s", 
+		cfg.Host, cfg.Port, cfg.SuperUser, getEnvWithDefault("POSTGRES_SSL_MODE", "disable"))
 
 	config, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
