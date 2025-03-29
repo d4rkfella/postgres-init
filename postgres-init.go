@@ -137,17 +137,19 @@ func waitForPostgres(ctx context.Context, pool *pgxpool.Pool, cfg Config) {
 }
 
 func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
-	var exists int // Change from bool to int
+	var exists int
 	err := pool.QueryRow(ctx, "SELECT 1 FROM pg_roles WHERE rolname = $1", cfg.User).Scan(&exists)
 
 	if err != nil && !strings.Contains(err.Error(), "no rows in result set") {
 		return fmt.Errorf("⚠️ Failed to check user existence: %w", err)
 	}
 
-	if exists != 1 { // Check if the value returned is 1, meaning the user exists
+	// If the user doesn't exist, create the user
+	if exists != 1 {
 		colorPrint(fmt.Sprintf("👤 Creating user %s...", cfg.User), "green")
 		sql := fmt.Sprintf("CREATE ROLE \"%s\" LOGIN PASSWORD '%s'", cfg.User, cfg.UserPass)
-
+		
+		// Add user flags if any
 		if cfg.UserFlags != "" {
 			flags := strings.Fields(cfg.UserFlags)
 			for _, flag := range flags {
@@ -177,7 +179,16 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 		if _, err = pool.Exec(ctx, sql); err != nil {
 			return fmt.Errorf("❌ Failed to create user: %w", err)
 		}
+	} else {
+		// If the user exists, modify the password
+		colorPrint(fmt.Sprintf("👤 Updating password for existing user %s...", cfg.User), "green")
+		sql := fmt.Sprintf("ALTER ROLE \"%s\" WITH PASSWORD '%s'", cfg.User, cfg.UserPass)
+
+		if _, err = pool.Exec(ctx, sql); err != nil {
+			return fmt.Errorf("❌ Failed to update user password: %w", err)
+		}
 	}
+
 	return nil
 }
 
