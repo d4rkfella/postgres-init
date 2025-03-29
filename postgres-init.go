@@ -136,14 +136,14 @@ func waitForPostgres(ctx context.Context, pool *pgxpool.Pool, cfg Config) {
 }
 
 func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
-	var exists bool
+	var exists int // Change from bool to int
 	err := pool.QueryRow(ctx, "SELECT 1 FROM pg_roles WHERE rolname = $1", cfg.User).Scan(&exists)
 
 	if err != nil && !strings.Contains(err.Error(), "no rows in result set") {
 		return fmt.Errorf("⚠️ Failed to check user existence: %w", err)
 	}
 
-	if !exists {
+	if exists != 1 { // Check if the value returned is 1, meaning the user exists
 		colorPrint(fmt.Sprintf("👤 Creating user %s...", cfg.User), "green")
 		sql := fmt.Sprintf("CREATE ROLE \"%s\" LOGIN PASSWORD '%s'", cfg.User, cfg.UserPass)
 
