@@ -44,11 +44,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if err := updateUserPassword(ctx, pool, cfg); err != nil {
-		log.Fatal(err)
-	}
-
-	if err := processDatabases(ctx, pool, cfg); err != nil {
+	if err := createDatabase(ctx, pool, cfg); err != nil {
 		log.Fatal(err)
 	}
 
