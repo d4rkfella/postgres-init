@@ -101,7 +101,7 @@ func connectPostgres(ctx context.Context, cfg Config) *pgxpool.Pool {
 	}
 
 	log.Printf("🔄 Connecting to PostgreSQL with host=%s, port=%d, user=%s, sslmode=%s", 
-		cfg.Host, cfg.Port, cfg.SuperUser, getEnvWithDefault("POSTGRES_SSL_MODE", "disable"))
+		cfg.Host, cfg.Port, cfg.SuperUser, cfg.SSLMode
 
 	config, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
