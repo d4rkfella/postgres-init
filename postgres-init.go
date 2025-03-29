@@ -182,7 +182,7 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	} else {
 		// If the user exists, modify the password
 		colorPrint(fmt.Sprintf("👤 Updating password for existing user %s...", cfg.User), "green")
-		sql := fmt.Sprintf(`ALTER ROLE "%s" WITH PASSWORD '%s'`, cfg.User, cfg.UserPass)
+		sql := fmt.Sprintf(`ALTER ROLE "%s" WITH ENCRYPTED PASSWORD '%s'`, cfg.User, cfg.UserPass)
 
 		if _, err = pool.Exec(ctx, sql); err != nil {
 			return fmt.Errorf("❌ Failed to update user password: %w", err)
@@ -210,12 +210,12 @@ func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	}
 
 	// Always grant privileges to the user
-	colorPrint("🔑 Granting privileges to user on database...", "green")
+	colorPrint(fmt.Sprintf("🔑 Granting all privileges to user \"%s\" on database \"%s\"...", cfg.User, cfg.DBName), "green")
 	sql := fmt.Sprintf(`GRANT ALL PRIVILEGES ON DATABASE "%s" TO "%s"`, cfg.DBName, cfg.User)
 	if _, err = pool.Exec(ctx, sql); err != nil {
-		return fmt.Errorf("❌ Failed to grant privileges: %w", err)
+	    return fmt.Errorf("❌ Failed to grant privileges: %w", err)
 	}
-
+	
 	return nil
 }
 
