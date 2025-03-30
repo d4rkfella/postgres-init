@@ -14,19 +14,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type Config struct {
-	Host        string
-	Port        int
-	SuperUser   string
-	SuperPass   string
-	User        string
-	UserPass    string
-	DBName      string
-	UserFlags   string
-	SSLMode     string
-	SSLRootCert string
-}
-
 const (
 	Red     = "red"
 	Green   = "green"
@@ -51,6 +38,15 @@ func (e *DatabaseError) Unwrap() error {
 	return e.Err
 }
 
+type ConfigError struct {
+	Operation string
+	Detail    string
+}
+
+func (e *ConfigError) Error() string {
+	return fmt.Sprintf("%s: %s", e.Operation, e.Detail)
+}
+
 func main() {
 	if err := run(); err != nil {
 		colorPrint(fmt.Sprintf("❌ Error: %v", err), Red)
@@ -66,7 +62,7 @@ func quoteLiteral(literal string) string {
 func run() error {
 	cfg, err := loadConfig()
 	if err != nil {
-		return fmt.Errorf("configuration failed: %w", err)
+		return err
 	}
 
 	ctx := context.Background()
@@ -91,82 +87,139 @@ func run() error {
 	return nil
 }
 
+type Config struct {
+	Host        string `redact:"false"`
+	Port        int    `redact:"false"`
+	SuperUser   string `redact:"false"`
+	SuperPass   string `redact:"true"`
+	User        string `redact:"false"`
+	UserPass    string `redact:"true"`
+	DBName      string `redact:"false"`
+	UserFlags   string `redact:"false"`
+	SSLMode     string `redact:"false"`
+	SSLRootCert string `redact:"false"`
+}
+
+func (c Config) String() string {
+	return fmt.Sprintf(
+		"Config{Host:%q, Port:%d, SuperUser:%q, SuperPass:%s, User:%q, UserPass:%s, DBName:%q, UserFlags:%q, SSLMode:%q, SSLRootCert:%q}",
+		c.Host,
+		c.Port,
+		c.SuperUser,
+		redactString(c.SuperPass),
+		c.User,
+		redactString(c.UserPass),
+		c.DBName,
+		c.UserFlags,
+		c.SSLMode,
+		c.SSLRootCert,
+	)
+}
+
+func redactString(s string) string {
+	if s == "" {
+		return `""`
+	}
+	return `"[REDACTED]"`
+}
+
 func loadConfig() (Config, error) {
-	port, err := strconv.Atoi(getEnvWithDefault("INIT_POSTGRES_PORT", "5432"))
-	if err != nil {
-		return Config{}, &DatabaseError{
-			Operation: "config",
-			Detail:   "invalid port number",
-			Err:      err,
-		}
-	}
+    var cfg Config
 
-	superUser, err := mustGetEnv("INIT_POSTGRES_SUPER_USER")
-	if err != nil {
-		return Config{}, wrapEnvError(err)
-	}
+    cfg.SuperUser = os.Getenv("INIT_POSTGRES_SUPER_USER")
+    cfg.SuperPass = os.Getenv("INIT_POSTGRES_SUPER_PASS")
+    cfg.User = os.Getenv("INIT_POSTGRES_USER")
+    cfg.UserPass = os.Getenv("INIT_POSTGRES_PASS")
+    cfg.DBName = os.Getenv("INIT_POSTGRES_DBNAME")
+    cfg.Host = os.Getenv("INIT_POSTGRES_HOST")
 
-	superPass, err := mustGetEnv("INIT_POSTGRES_SUPER_PASS")
-	if err != nil {
-		return Config{}, wrapEnvError(err)
-	}
+    cfg.Port = getEnvWithDefault("INIT_POSTGRES_PORT", "5432") 
 
-	user, err := mustGetEnv("INIT_POSTGRES_USER")
-	if err != nil {
-		return Config{}, wrapEnvError(err)
-	}
+    cfg.UserFlags = os.Getenv("INIT_POSTGRES_USER_FLAGS")
+    cfg.SSLMode = getEnvWithDefault("INIT_POSTGRES_SSLMODE", "disable")
+    cfg.SSLRootCert = os.Getenv("INIT_POSTGRES_SSLROOTCERT")
 
-	userPass, err := mustGetEnv("INIT_POSTGRES_PASS")
-	if err != nil {
-		return Config{}, wrapEnvError(err)
-	}
+    if err := validateConfig(&cfg); err != nil {
+        return Config{}, err
+    }
 
-	dbName, err := mustGetEnv("INIT_POSTGRES_DBNAME")
-	if err != nil {
-		return Config{}, wrapEnvError(err)
-	}
-
-	host, err := mustGetEnv("INIT_POSTGRES_HOST")
-	if err != nil {
-		return Config{}, wrapEnvError(err)
-	}
-
-	return Config{
-		Host:        host,
-		Port:        port,
-		SuperUser:   superUser,
-		SuperPass:   superPass,
-		User:        user,
-		UserPass:    userPass,
-		DBName:      dbName,
-		UserFlags:   os.Getenv("INIT_POSTGRES_USER_FLAGS"),
-		SSLMode:     getEnvWithDefault("INIT_POSTGRES_SSLMODE", "disable"),
-		SSLRootCert: os.Getenv("INIT_POSTGRES_SSLROOTCERT"),
-	}, nil
+    return cfg, nil
 }
 
-func wrapEnvError(err error) error {
-	return &DatabaseError{
-		Operation: "config",
-		Detail:   "missing environment variable",
-		Err:      err,
+func validateConfig(cfg *Config) error {
+    var err error
+
+    required := []struct{
+        key   string
+        field *string
+    }{
+        {"INIT_POSTGRES_SUPER_USER", &cfg.SuperUser},
+        {"INIT_POSTGRES_SUPER_PASS", &cfg.SuperPass},
+        {"INIT_POSTGRES_USER", &cfg.User},
+        {"INIT_POSTGRES_PASS", &cfg.UserPass},
+        {"INIT_POSTGRES_DBNAME", &cfg.DBName},
+        {"INIT_POSTGRES_HOST", &cfg.Host},
+    }
+
+    for _, req := range required {
+        if *req.field, err = getRequiredEnv(req.key); err != nil {
+            return configError("", req.key, err)
+        }
+    }
+
+    portStr := getEnvWithDefault("INIT_POSTGRES_PORT", "5432")
+    cfg.Port, err = strconv.Atoi(portStr)
+    if err != nil {
+        return configError("invalid port number", portStr, err)
+    }
+
+    if cfg.Port < 1 || cfg.Port > 65535 {
+        return configError("invalid port range", strconv.Itoa(cfg.Port), nil)
+    }
+
+    allowedModes := map[string]bool{
+        "disable":     true,
+        "allow":       true,
+        "prefer":      true,
+        "require":     true,
+        "verify-ca":   true,
+        "verify-full": true,
+    }
+
+    if !allowedModes[cfg.SSLMode] {
+        return configError("invalid SSL mode", cfg.SSLMode, nil)
+    }
+
+    if (cfg.SSLMode == "verify-ca" || cfg.SSLMode == "verify-full") && cfg.SSLRootCert == "" {
+        return configError("SSL mode requires SSLRootCert to be set", fmt.Sprintf("%q", cfg.SSLMode), nil)
+    }
+
+    return nil
+}
+
+func configError(context, value string, err error) error {
+	msg := fmt.Sprintf("%s: %q", context, value)
+	if err != nil {
+		msg += fmt.Sprintf(" (%v)", err)
+	}
+	return &ConfigError{
+		Operation: "configuration",
+		Detail:   msg,
 	}
 }
 
-func mustGetEnv(key string) (string, error) {
-	value := os.Getenv(key)
-	if value == "" {
-		return "", fmt.Errorf("required environment variable %s is not set", key)
-	}
-	return value, nil
+func getRequiredEnv(key string) (string, error) {
+    if value := os.Getenv(key); value != "" {
+        return value, nil
+    }
+    return "", fmt.Errorf("required environment variable %s not set", key)
 }
 
 func getEnvWithDefault(key, defaultValue string) string {
-	value := os.Getenv(key)
-	if value == "" {
-		return defaultValue
+	if value := os.Getenv(key); value != "" {
+		return value
 	}
-	return value
+	return defaultValue
 }
 
 func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
@@ -178,12 +231,6 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 		url.QueryEscape(cfg.SuperUser), 
 		cfg.SSLMode)
 
-	if (cfg.SSLMode == "verify-ca" || cfg.SSLMode == "verify-full") && cfg.SSLRootCert == "" {
-		return nil, &DatabaseError{
-			Operation: "SSL configuration",
-			Detail:   fmt.Sprintf("SSL mode '%s' requires certificate", cfg.SSLMode),
-		}
-	}
 	if cfg.SSLRootCert != "" {
 		connStr += fmt.Sprintf("&sslrootcert=%s", url.QueryEscape(cfg.SSLRootCert))
 	}
@@ -239,7 +286,7 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	if err != nil && !strings.Contains(err.Error(), "no rows in result set") {
 		return &DatabaseError{
 			Operation: "user check",
-			Detail:   fmt.Sprintf("failed to verify user '%s'", cfg.User),
+			Detail:   fmt.Sprintf("failed to verify the existence of user '%s'", cfg.User),
 			Err:      err,
 		}
 	}
@@ -296,7 +343,7 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 		if _, err = pool.Exec(ctx, sql); err != nil {
 			return &DatabaseError{
 				Operation: "user update",
-				Detail:   fmt.Sprintf("failed to update user %s", pgx.Identifier{cfg.User}.Sanitize()),
+				Detail:   fmt.Sprintf("failed to update the password for user %s", pgx.Identifier{cfg.User}.Sanitize()),
 				Err:      err,
 			}
 		}
@@ -311,7 +358,7 @@ func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	if err != nil && !strings.Contains(err.Error(), "no rows in result set") {
 		return &DatabaseError{
 			Operation: "database check",
-			Detail:   fmt.Sprintf("failed to verify database '%s'", cfg.DBName),
+			Detail:   fmt.Sprintf("failed to verify the existence of database '%s'", cfg.DBName),
 			Err:      err,
 		}
 	}
