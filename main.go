@@ -2,18 +2,20 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
-	"os"
-	"net/url"
-	"strings"
-	"strconv"
-	"time"
 	"log"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	pgxssl "github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ======================
@@ -164,6 +166,25 @@ func loadConfig() (Config, error) {
 		}
 	}
 
+	// Validate passwords
+	if err := validatePassword(cfg.SuperPass); err != nil {
+		return Config{}, &ConfigError{
+			Operation: "validation",
+			Variable:  "INIT_POSTGRES_SUPER_PASS",
+			Detail:    "invalid superuser password",
+			Expected:  err.Error(),
+		}
+	}
+	
+	if err := validatePassword(cfg.UserPass); err != nil {
+		return Config{}, &ConfigError{
+			Operation: "validation",
+			Variable:  "INIT_POSTGRES_PASS",
+			Detail:    "invalid application user password",
+			Expected:  err.Error(),
+		}
+	}
+
 	portStr := getEnvWithDefault("INIT_POSTGRES_PORT", "5432")
 	cfg.Port, err = strconv.Atoi(portStr)
 	if err != nil || cfg.Port < 1 || cfg.Port > 65535 {
@@ -186,42 +207,49 @@ func loadConfig() (Config, error) {
 	return cfg, nil
 }
 
+func validatePassword(pass string) error {
+	if len(pass) < 12 {
+		return fmt.Errorf("minimum 12 characters required")
+	}
+	return nil
+}
+
 func validateSSLConfig(sslMode, sslRootCert string) error {
-    allowedModes := map[string]bool{
-        "disable": true, "allow": true, "prefer": true, 
-        "require": true, "verify-ca": true, "verify-full": true,
-    }
+	allowedModes := map[string]bool{
+		"disable": true, "allow": true, "prefer": true, 
+		"require": true, "verify-ca": true, "verify-full": true,
+	}
 
-    if !allowedModes[sslMode] {
-        return &ConfigError{
-            Operation: "validation",
-            Variable:  "INIT_POSTGRES_SSLMODE",
-            Detail:    "invalid SSL mode",
-            Expected:  "one of: disable, allow, prefer, require, verify-ca, verify-full",
-        }
-    }
+	if !allowedModes[sslMode] {
+		return &ConfigError{
+			Operation: "validation",
+			Variable:  "INIT_POSTGRES_SSLMODE",
+			Detail:    "invalid SSL mode",
+			Expected:  "one of: disable, allow, prefer, require, verify-ca, verify-full",
+		}
+	}
 
-    if (sslMode == "verify-ca" || sslMode == "verify-full") {
-        if sslRootCert == "" {
-            return &ConfigError{
-                Operation: "validation",
-                Variable:  "INIT_POSTGRES_SSLROOTCERT",
-                Detail:    "SSL certificate required",
-                Expected:  "path to SSL root certificate",
-            }
-        }
-        if _, err := os.Stat(sslRootCert); err != nil {
-            return &ConfigError{
-                Operation: "validation",
-                Variable:  "INIT_POSTGRES_SSLROOTCERT",
-                Detail:    "SSL certificate file not found",
-                Expected:  "valid path to CA certificate file",
-                Err:      err,
-            }
-        }
-    }
+	if sslMode == "verify-ca" || sslMode == "verify-full" {
+		if sslRootCert == "" {
+			return &ConfigError{
+				Operation: "validation",
+				Variable:  "INIT_POSTGRES_SSLROOTCERT",
+				Detail:    "SSL certificate required",
+				Expected:  "path to SSL root certificate",
+			}
+		}
+		if _, err := os.Stat(sslRootCert); err != nil {
+			return &ConfigError{
+				Operation: "validation",
+				Variable:  "INIT_POSTGRES_SSLROOTCERT",
+				Detail:    "SSL certificate file not found",
+				Expected:  "valid path to CA certificate file",
+				Err:      err,
+			}
+		}
+	}
 
-    return nil
+	return nil
 }
 
 func getRequiredEnv(key string) (string, error) {
@@ -243,97 +271,144 @@ func getEnvWithDefault(key, defaultValue string) string {
 // ======================
 
 func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
-    const maxAttempts = 30
-    const baseDelay = 1 * time.Second
+	const maxAttempts = 30
+	const baseDelay = 1 * time.Second
 
-    // Properly escape special characters in credentials
-    escapedUser := url.QueryEscape(cfg.SuperUser)
-    escapedPass := url.QueryEscape(cfg.SuperPass)
-    escapedDB := url.QueryEscape(cfg.SuperUser)
+	// Properly escape special characters
+	escapedUser := url.QueryEscape(cfg.SuperUser)
+	escapedPass := url.QueryEscape(cfg.SuperPass)
+	escapedDB := url.QueryEscape(cfg.SuperUser)
 
-    connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
-        escapedUser,
-        escapedPass,
-        cfg.Host,
-        cfg.Port,
-        escapedDB,
-        cfg.SSLMode)
+	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s",
+		escapedUser,
+		escapedPass,
+		cfg.Host,
+		cfg.Port,
+		escapedDB)
 
-    if cfg.SSLRootCert != "" {
-        connStr += fmt.Sprintf("&sslrootcert=%s", url.QueryEscape(cfg.SSLRootCert))
-    }
+	parsedConfig, err := pgxpool.ParseConfig(connStr)
+	if err != nil {
+		return nil, &DatabaseError{
+			Operation: "configuration",
+			Detail:   "invalid connection parameters",
+			Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+			Advice:   "Check special characters in credentials",
+			Err:      err,
+		}
+	}
 
-    parsedConfig, err := pgxpool.ParseConfig(connStr)
-    if err != nil {
-        return nil, &DatabaseError{
-            Operation: "configuration",
-            Detail:   "invalid connection parameters",
-            Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-            Advice:   "Check special characters in credentials and SSL configuration",
-            Err:      err,
-        }
-    }
+	// Configure TLS
+	tlsConfig, err := createTLSConfig(cfg.SSLMode, cfg.SSLRootCert)
+	if err != nil {
+		return nil, err
+	}
+	parsedConfig.ConnConfig.TLSConfig = tlsConfig
 
-    parsedConfig.MaxConns = 3
-    parsedConfig.MinConns = 1
-    parsedConfig.MaxConnLifetime = 5 * time.Minute
+	// Pool settings
+	parsedConfig.MaxConns = 3
+	parsedConfig.MinConns = 1
+	parsedConfig.MaxConnLifetime = 5 * time.Minute
+	parsedConfig.ConnConfig.ConnectTimeout = 10 * time.Second
 
-    pool, err := pgxpool.NewWithConfig(ctx, parsedConfig)
-    if err != nil {
-        return nil, &DatabaseError{
-            Operation: "connection",
-            Detail:   "failed to create connection pool",
-            Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-            Advice:   "Verify network connectivity and credentials",
-            Err:      err,
-        }
-    }
+	pool, err := pgxpool.NewWithConfig(ctx, parsedConfig)
+	if err != nil {
+		return nil, &DatabaseError{
+			Operation: "connection",
+			Detail:   "failed to create connection pool",
+			Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+			Advice:   "Verify network connectivity and credentials",
+			Err:      err,
+		}
+	}
 
-    defer func() {
-        if err != nil {
-            pool.Close()
-        }
-    }()
+	defer func() {
+		if err != nil {
+			pool.Close()
+			log.Println("Closed connection pool due to initialization failure")
+		}
+	}()
 
-    for attempt := 1; attempt <= maxAttempts; attempt++ {
-        err = pool.Ping(ctx)
-        if err == nil {
-            colorPrint(fmt.Sprintf("✅ Successfully connected to %s:%d", cfg.Host, cfg.Port), "green")
-            return pool, nil
-        }
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		err = pool.Ping(ctx)
+		if err == nil {
+			colorPrint(fmt.Sprintf("✅ Successfully connected to %s:%d", cfg.Host, cfg.Port), "green")
+			return pool, nil
+		}
 
-        if isAuthError(err) {
-            return nil, &DatabaseError{
-                Operation: "authentication",
-                Detail:   "invalid credentials",
-                Target:   fmt.Sprintf("%s@%s:%d", cfg.SuperUser, cfg.Host, cfg.Port),
-                Code:     extractSQLState(err),
-                Advice:   "Verify INIT_POSTGRES_SUPER_USER and INIT_POSTGRES_SUPER_PASS",
-                Err:      err,
-            }
-        }
+		if isAuthError(err) {
+			return nil, &DatabaseError{
+				Operation: "authentication",
+				Detail:   "invalid credentials",
+				Target:   fmt.Sprintf("%s@%s:%d", cfg.SuperUser, cfg.Host, cfg.Port),
+				Code:     extractSQLState(err),
+				Advice:   "Verify INIT_POSTGRES_SUPER_USER and INIT_POSTGRES_SUPER_PASS",
+				Err:      err,
+			}
+		}
 
-        if attempt < maxAttempts {
-            colorPrint(
-                fmt.Sprintf("⏳ Connection validation attempt %d/%d failed: %v. Retrying...", 
-                    attempt, maxAttempts, err),
-                "yellow",
-            )
-            select {
-            case <-time.After(baseDelay * time.Duration(attempt)):
-            case <-ctx.Done():
-                return nil, ctx.Err()
-            }
-        }
-    }
+		if attempt < maxAttempts {
+			colorPrint(
+				fmt.Sprintf("⏳ Connection validation attempt %d/%d failed: %v. Retrying...", 
+					attempt, maxAttempts, err),
+				"yellow",
+			)
+			select {
+			case <-time.After(baseDelay * time.Duration(attempt)):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	}
 
-    return nil, &DatabaseError{
-        Operation: "connection",
-        Detail:   fmt.Sprintf("failed after %d validation attempts", maxAttempts),
-        Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-        Advice:   "Check database availability and network stability",
-        Err:      err,
-    }
+	return nil, &DatabaseError{
+		Operation: "connection",
+		Detail:   fmt.Sprintf("failed after %d validation attempts", maxAttempts),
+		Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		Advice:   "Check database availability and network stability",
+		Err:      err,
+	}
+}
+
+func createTLSConfig(sslMode, sslRootCert string) (*tls.Config, error) {
+	if sslMode == "disable" {
+		return nil, nil
+	}
+
+	sslConfig := &pgxssl.Config{
+		TLSConfig: &tls.Config{},
+	}
+
+	switch sslMode {
+	case "require":
+		sslConfig.TLSConfig.InsecureSkipVerify = true
+	case "verify-ca", "verify-full":
+		if sslRootCert != "" {
+			certBytes, err := os.ReadFile(sslRootCert)
+			if err != nil {
+				return nil, &DatabaseError{
+					Operation: "ssl-config",
+					Detail:   "failed to read SSL certificate",
+					Target:   sslRootCert,
+					Advice:   "Verify file permissions and path",
+					Err:      err,
+				}
+			}
+			sslConfig.TLSConfig.RootCAs = x509.NewCertPool()
+			if ok := sslConfig.TLSConfig.RootCAs.AppendCertsFromPEM(certBytes); !ok {
+				return nil, &DatabaseError{
+					Operation: "ssl-config",
+					Detail:   "failed to parse SSL certificate",
+					Target:   sslRootCert,
+					Advice:   "Verify certificate is in PEM format",
+				}
+			}
+		}
+		if sslMode == "verify-full" {
+			sslConfig.TLSConfig.ServerName = os.Getenv("INIT_POSTGRES_HOST")
+		}
+	}
+
+	return sslConfig.TLSConfig, nil
 }
 
 func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
@@ -345,7 +420,7 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 
 	var exists bool
 	err = tx.QueryRow(ctx, 
-		"SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1)", 
+		"SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1", 
 		cfg.User,
 	).Scan(&exists)
 
@@ -359,13 +434,24 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 		}
 	}
 
+	flags, err := parseUserFlags(cfg.UserFlags)
+	if err != nil {
+		return &DatabaseError{
+			Operation: "user-config",
+			Detail:   "invalid user flags",
+			Target:   cfg.UserFlags,
+			Advice:   "Use supported role flags",
+			Err:      err,
+		}
+	}
+
 	if !exists {
 		colorPrint(fmt.Sprintf("👤 Creating user %s...", cfg.User), "green")
 		sql := fmt.Sprintf(
 			`CREATE ROLE %s LOGIN ENCRYPTED PASSWORD %s %s`,
 			pgx.Identifier{cfg.User}.Sanitize(),
 			quoteLiteral(cfg.UserPass),
-			parseUserFlags(cfg.UserFlags),
+			flags,
 		)
 
 		if _, err = tx.Exec(ctx, sql); err != nil {
@@ -383,7 +469,7 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 			`ALTER ROLE %s WITH ENCRYPTED PASSWORD %s %s`,
 			pgx.Identifier{cfg.User}.Sanitize(),
 			quoteLiteral(cfg.UserPass),
-			parseUserFlags(cfg.UserFlags),
+			flags,
 		)
 
 		if _, err = tx.Exec(ctx, sql); err != nil {
@@ -400,7 +486,7 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	return tx.Commit(ctx)
 }
 
-func parseUserFlags(flags string) string {
+func parseUserFlags(flags string) (string, error) {
 	var validFlags []string
 	for _, flag := range strings.Fields(flags) {
 		switch flag {
@@ -408,10 +494,10 @@ func parseUserFlags(flags string) string {
 			"--replication", "--superuser", "--no-superuser":
 			validFlags = append(validFlags, strings.TrimPrefix(flag, "--"))
 		default:
-			log.Printf("⚠️ Warning: Ignoring unsupported user flag: %s", flag)
+			return "", fmt.Errorf("unsupported user flag: %s", flag)
 		}
 	}
-	return strings.Join(validFlags, " ")
+	return strings.Join(validFlags, " "), nil
 }
 
 func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
@@ -508,7 +594,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-        
+	
 	log.Printf("📋 Loaded configuration:\n%s", cfg.String())
 	
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -518,7 +604,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer pool.Close()
+	defer func() {
+		pool.Close()
+		log.Println("Closed database connection pool")
+	}()
 
 	if err := createUser(ctx, pool, cfg); err != nil {
 		return err
