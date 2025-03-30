@@ -2,15 +2,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"strconv"
-	"net/url"
 	"time"
 	"log"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -113,23 +114,21 @@ func redactString(s string) string {
 }
 
 func extractSQLState(err error) string {
-	if err == nil {
-		return ""
-	}
-	msg := err.Error()
-	if idx := strings.Index(msg, "SQLSTATE "); idx != -1 {
-		if idx+14 <= len(msg) {
-			return msg[idx+9 : idx+14]
-		}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code
 	}
 	return ""
 }
 
 func isAuthError(err error) bool {
-    return strings.Contains(err.Error(), "password authentication failed") ||
-        strings.Contains(err.Error(), "role \"") ||
-        strings.Contains(err.Error(), "authentication failed") ||
-        strings.Contains(err.Error(), "SASL authentication failed")
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Severity == "FATAL" && 
+			(pgErr.Code == "28P01" || // invalid_password
+			 pgErr.Code == "28000")   // invalid_authorization
+	}
+	return false
 }
 
 func quoteLiteral(literal string) string {
@@ -144,7 +143,6 @@ func loadConfig() (Config, error) {
 	var cfg Config
 	var err error
 
-	// Load required variables
 	required := map[string]*string{
 		"INIT_POSTGRES_SUPER_USER": &cfg.SuperUser,
 		"INIT_POSTGRES_SUPER_PASS": &cfg.SuperPass,
@@ -165,10 +163,9 @@ func loadConfig() (Config, error) {
 		}
 	}
 
-	// Load and validate port
 	portStr := getEnvWithDefault("INIT_POSTGRES_PORT", "5432")
 	cfg.Port, err = strconv.Atoi(portStr)
-	if err != nil {
+	if err != nil || cfg.Port < 1 || cfg.Port > 65535 {
 		return Config{}, &ConfigError{
 			Operation: "validation",
 			Variable:  "INIT_POSTGRES_PORT",
@@ -176,21 +173,11 @@ func loadConfig() (Config, error) {
 			Expected:  "integer between 1-65535",
 		}
 	}
-	if cfg.Port < 1 || cfg.Port > 65535 {
-		return Config{}, &ConfigError{
-			Operation: "validation",
-			Variable:  "INIT_POSTGRES_PORT",
-			Detail:    "port out of range",
-			Expected:  "1-65535",
-		}
-	}
 
-	// Load optional values
 	cfg.UserFlags = os.Getenv("INIT_POSTGRES_USER_FLAGS")
 	cfg.SSLMode = getEnvWithDefault("INIT_POSTGRES_SSLMODE", "disable")
 	cfg.SSLRootCert = os.Getenv("INIT_POSTGRES_SSLROOTCERT")
 
-	// Validate SSL config
 	if err := validateSSLConfig(cfg.SSLMode, cfg.SSLRootCert); err != nil {
 		return Config{}, err
 	}
@@ -200,12 +187,8 @@ func loadConfig() (Config, error) {
 
 func validateSSLConfig(sslMode, sslRootCert string) error {
 	allowedModes := map[string]bool{
-		"disable":     true,
-		"allow":       true,
-		"prefer":      true,
-		"require":     true,
-		"verify-ca":   true,
-		"verify-full": true,
+		"disable": true, "allow": true, "prefer": true, 
+		"require": true, "verify-ca": true, "verify-full": true,
 	}
 
 	if !allowedModes[sslMode] {
@@ -246,79 +229,110 @@ func getEnvWithDefault(key, defaultValue string) string {
 // ======================
 // Database Operations
 // ======================
+
 func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
-    const maxAttempts = 30
-    const baseDelay = 1 * time.Second
+	const maxAttempts = 30
+	const baseDelay = 1 * time.Second
 
-    connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
-        url.QueryEscape(cfg.SuperUser),
-        url.QueryEscape(cfg.SuperPass),
-        cfg.Host,
-        cfg.Port,
-        url.QueryEscape(cfg.SuperUser),
-        cfg.SSLMode)
+	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+		cfg.SuperUser,
+		cfg.SuperPass,
+		cfg.Host,
+		cfg.Port,
+		cfg.SuperUser,
+		cfg.SSLMode)
 
-    pool, err := pgxpool.New(ctx, connStr)
-    if err != nil {
-        return nil, &DatabaseError{
-            Operation: "configuration",
-            Detail:   "invalid connection parameters",
-            Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-            Advice:   "Check host, port, and SSL configuration",
-            Err:      err,
-        }
-    }
-    defer func() {
-        if err != nil {
-            pool.Close()
-        }
-    }()
+	if cfg.SSLRootCert != "" {
+		connStr += fmt.Sprintf("&sslrootcert=%s", cfg.SSLRootCert)
+	}
 
-    for attempt := 1; attempt <= maxAttempts; attempt++ {
-        err = pool.Ping(ctx)
-        if err == nil {
-	    colorPrint(fmt.Sprintf("✅ Successfully connected to %s:%d", cfg.Host, cfg.Port), "green")
-            return pool, nil
-        }
+	parsedConfig, err := pgxpool.ParseConfig(connStr)
+	if err != nil {
+		return nil, &DatabaseError{
+			Operation: "configuration",
+			Detail:   "invalid connection parameters",
+			Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+			Advice:   "Check host, port, and SSL configuration",
+			Err:      err,
+		}
+	}
 
-        if isAuthError(err) {
-            return nil, &DatabaseError{
-                Operation: "authentication",
-                Detail:   "invalid credentials",
-                Target:   fmt.Sprintf("%s@%s:%d", cfg.SuperUser, cfg.Host, cfg.Port),
-                Code:     extractSQLState(err),
-                Advice:   "Verify INIT_POSTGRES_SUPER_USER and INIT_POSTGRES_SUPER_PASS",
-                Err:      err,
-            }
-        }
+	parsedConfig.MaxConns = 3
+	parsedConfig.MinConns = 1
+	parsedConfig.MaxConnLifetime = 5 * time.Minute
 
-        if attempt < maxAttempts {
-            colorPrint(
-                fmt.Sprintf("⏳ Connection validation attempt %d/%d failed: %v. Retrying...", 
-                    attempt, maxAttempts, err),
-                "yellow",
-            )
-            select {
-            case <-time.After(baseDelay):
-            case <-ctx.Done():
-                return nil, ctx.Err()
-            }
-        }
-    }
+	pool, err := pgxpool.NewWithConfig(ctx, parsedConfig)
+	if err != nil {
+		return nil, &DatabaseError{
+			Operation: "connection",
+			Detail:   "failed to create connection pool",
+			Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+			Advice:   "Verify network connectivity and database availability",
+			Err:      err,
+		}
+	}
 
-    return nil, &DatabaseError{
-        Operation: "connection",
-        Detail:   fmt.Sprintf("failed after %d validation attempts", maxAttempts),
-        Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-        Advice:   "Check database availability and network stability",
-        Err:      err,
-    }
+	defer func() {
+		if err != nil {
+			pool.Close()
+		}
+	}()
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		err = pool.Ping(ctx)
+		if err == nil {
+			colorPrint(fmt.Sprintf("✅ Successfully connected to %s:%d", cfg.Host, cfg.Port), "green")
+			return pool, nil
+		}
+
+		if isAuthError(err) {
+			return nil, &DatabaseError{
+				Operation: "authentication",
+				Detail:   "invalid credentials",
+				Target:   fmt.Sprintf("%s@%s:%d", cfg.SuperUser, cfg.Host, cfg.Port),
+				Code:     extractSQLState(err),
+				Advice:   "Verify INIT_POSTGRES_SUPER_USER and INIT_POSTGRES_SUPER_PASS",
+				Err:      err,
+			}
+		}
+
+		if attempt < maxAttempts {
+			colorPrint(
+				fmt.Sprintf("⏳ Connection validation attempt %d/%d failed: %v. Retrying...", 
+					attempt, maxAttempts, err),
+				"yellow",
+			)
+			select {
+			case <-time.After(baseDelay * time.Duration(attempt)):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	}
+
+	return nil, &DatabaseError{
+		Operation: "connection",
+		Detail:   fmt.Sprintf("failed after %d validation attempts", maxAttempts),
+		Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		Advice:   "Check database availability and network stability",
+		Err:      err,
+	}
 }
-func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
-	var exists int
-	err := pool.QueryRow(ctx, "SELECT 1 FROM pg_roles WHERE rolname = $1", cfg.User).Scan(&exists)
 
-	if err != nil && !strings.Contains(err.Error(), "no rows in result set") {
+func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to start transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var exists bool
+	err = tx.QueryRow(ctx, 
+		"SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1)", 
+		cfg.User,
+	).Scan(&exists)
+
+	if err != nil {
 		return &DatabaseError{
 			Operation: "user check",
 			Detail:   fmt.Sprintf("failed to verify user %q", cfg.User),
@@ -328,41 +342,16 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 		}
 	}
 
-	if exists != 1 {
+	if !exists {
 		colorPrint(fmt.Sprintf("👤 Creating user %s...", cfg.User), "green")
 		sql := fmt.Sprintf(
-			`CREATE ROLE %s LOGIN ENCRYPTED PASSWORD %s`,
+			`CREATE ROLE %s LOGIN ENCRYPTED PASSWORD %s %s`,
 			pgx.Identifier{cfg.User}.Sanitize(),
 			quoteLiteral(cfg.UserPass),
+			parseUserFlags(cfg.UserFlags),
 		)
-		
-		if cfg.UserFlags != "" {
-			flags := strings.Fields(cfg.UserFlags)
-			for _, flag := range flags {
-				switch flag {
-				case "--createdb":
-					sql += " CREATEDB"
-				case "--createrole":
-					sql += " CREATEROLE"
-				case "--inherit":
-					sql += " INHERIT"
-				case "--no-login":
-					sql += " NOLOGIN"
-				case "--replication":
-					sql += " REPLICATION"
-				case "--superuser":
-					sql += " SUPERUSER"
-				case "--no-superuser":
-					sql += " NOSUPERUSER"
-				default:
-					if strings.HasPrefix(flag, "--") {
-						log.Printf("⚠️ Warning: Unsupported user flag: %s", flag)
-					}
-				}
-			}
-		}
 
-		if _, err = pool.Exec(ctx, sql); err != nil {
+		if _, err = tx.Exec(ctx, sql); err != nil {
 			return &DatabaseError{
 				Operation: "user creation",
 				Detail:   fmt.Sprintf("failed to create user %s", pgx.Identifier{cfg.User}.Sanitize()),
@@ -372,31 +361,56 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 			}
 		}
 	} else {
-		colorPrint(fmt.Sprintf("👤 Updating password for existing user %s...", cfg.User), "green")
+		colorPrint(fmt.Sprintf("👤 Updating role %s...", cfg.User), "green")
 		sql := fmt.Sprintf(
-			`ALTER ROLE %s WITH ENCRYPTED PASSWORD %s`,
+			`ALTER ROLE %s WITH ENCRYPTED PASSWORD %s %s`,
 			pgx.Identifier{cfg.User}.Sanitize(),
 			quoteLiteral(cfg.UserPass),
+			parseUserFlags(cfg.UserFlags),
 		)
 
-		if _, err = pool.Exec(ctx, sql); err != nil {
+		if _, err = tx.Exec(ctx, sql); err != nil {
 			return &DatabaseError{
 				Operation: "user update",
-				Detail:   fmt.Sprintf("failed to update password for %s", pgx.Identifier{cfg.User}.Sanitize()),
+				Detail:   fmt.Sprintf("failed to update role %s", pgx.Identifier{cfg.User}.Sanitize()),
 				Target:   cfg.User,
 				Advice:   "Check password requirements and user permissions",
 				Err:      err,
 			}
 		}
 	}
-	return nil
+
+	return tx.Commit(ctx)
+}
+
+func parseUserFlags(flags string) string {
+	var validFlags []string
+	for _, flag := range strings.Fields(flags) {
+		switch flag {
+		case "--createdb", "--createrole", "--inherit", "--no-login", 
+			"--replication", "--superuser", "--no-superuser":
+			validFlags = append(validFlags, strings.TrimPrefix(flag, "--"))
+		default:
+			log.Printf("⚠️ Warning: Ignoring unsupported user flag: %s", flag)
+		}
+	}
+	return strings.Join(validFlags, " ")
 }
 
 func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
-	var exists int
-	err := pool.QueryRow(ctx, "SELECT 1 FROM pg_database WHERE datname = $1", cfg.DBName).Scan(&exists)
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to start transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
 
-	if err != nil && !strings.Contains(err.Error(), "no rows in result set") {
+	var exists bool
+	err = tx.QueryRow(ctx,
+		"SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)",
+		cfg.DBName,
+	).Scan(&exists)
+
+	if err != nil {
 		return &DatabaseError{
 			Operation: "database check",
 			Detail:   fmt.Sprintf("failed to verify database %q", cfg.DBName),
@@ -406,14 +420,15 @@ func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 		}
 	}
 
-	if exists != 1 {
+	if !exists {
 		colorPrint(fmt.Sprintf("📦 Creating database %s...", cfg.DBName), "green")
 		sql := fmt.Sprintf(
 			`CREATE DATABASE %s OWNER %s`,
 			pgx.Identifier{cfg.DBName}.Sanitize(),
 			pgx.Identifier{cfg.User}.Sanitize(),
 		)
-		if _, err = pool.Exec(ctx, sql); err != nil {
+
+		if _, err = tx.Exec(ctx, sql); err != nil {
 			return &DatabaseError{
 				Operation: "database creation",
 				Detail:   fmt.Sprintf("failed to create database %s", pgx.Identifier{cfg.DBName}.Sanitize()),
@@ -424,13 +439,14 @@ func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 		}
 	}
 
-	colorPrint(fmt.Sprintf("🔑 Granting privileges to user %q on database %q...", cfg.User, cfg.DBName), "green")
+	colorPrint(fmt.Sprintf("🔑 Granting privileges on %q to %q...", cfg.DBName, cfg.User), "green")
 	sql := fmt.Sprintf(
 		`GRANT ALL PRIVILEGES ON DATABASE %s TO %s`,
 		pgx.Identifier{cfg.DBName}.Sanitize(),
 		pgx.Identifier{cfg.User}.Sanitize(),
 	)
-	if _, err = pool.Exec(ctx, sql); err != nil {
+
+	if _, err = tx.Exec(ctx, sql); err != nil {
 		return &DatabaseError{
 			Operation: "privileges assignment",
 			Detail:   fmt.Sprintf("failed to grant privileges on %s", pgx.Identifier{cfg.DBName}.Sanitize()),
@@ -439,8 +455,8 @@ func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 			Err:      err,
 		}
 	}
-	
-	return nil
+
+	return tx.Commit(ctx)
 }
 
 // ======================
@@ -471,27 +487,29 @@ func colorPrint(text, color string) {
 }
 
 func run() error {
-    cfg, err := loadConfig()
-    if err != nil {
-        return err
-    }
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+        
+	log.Printf("📋 Loaded configuration:\n%s", cfg.String())
+	
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
 
-    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-    defer cancel()
+	pool, err := connectPostgres(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
 
-    pool, err := connectPostgres(ctx, cfg) // Fixed function name
-    if err != nil {
-        return err
-    }
-    defer pool.Close()
+	if err := createUser(ctx, pool, cfg); err != nil {
+		return err
+	}
 
-    if err := createUser(ctx, pool, cfg); err != nil {
-        return err
-    }
+	if err := createDatabase(ctx, pool, cfg); err != nil {
+		return err
+	}
 
-    if err := createDatabase(ctx, pool, cfg); err != nil {
-        return err
-    }
-
-    return nil
+	return nil
 }
