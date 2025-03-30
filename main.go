@@ -90,8 +90,13 @@ type Config struct {
 }
 
 func (c Config) String() string {
+	sslColor := "\033[31m"
+	if c.SSLMode == "verify-ca" || c.SSLMode == "verify-full" {
+		sslColor = "\033[32m"
+	}
+
 	return fmt.Sprintf(
-		"Config{Host:%q, Port:%d, SuperUser:%q, SuperPass:%s, User:%q, UserPass:%s, DBName:%q, UserFlags:%q, SSLMode:%q, SSLRootCert:%q}",
+		"Config{Host:%q, Port:%d, SuperUser:%q, SuperPass:%s, User:%q, UserPass:%s, DBName:%q, UserFlags:%q, SSLMode:%s%q\033[0m, SSLRootCert:%q}",
 		c.Host,
 		c.Port,
 		c.SuperUser,
@@ -100,6 +105,7 @@ func (c Config) String() string {
 		redactString(c.UserPass),
 		c.DBName,
 		c.UserFlags,
+		sslColor,
 		c.SSLMode,
 		c.SSLRootCert,
 	)
@@ -140,6 +146,104 @@ func isAuthError(err error) bool {
 
 func quoteLiteral(literal string) string {
 	return "'" + strings.ReplaceAll(literal, "'", "''") + "'"
+}
+
+func verifySSLConnection(state tls.ConnectionState, expectedHost, sslMode string) error {
+    if sslMode == "disable" {
+        return nil
+    }
+
+    // Basic certificate checks for all secure modes
+    if len(state.PeerCertificates) == 0 {
+        return errors.New("no server certificates presented")
+    }
+
+    // Mode-specific validation
+    switch sslMode {
+    case "require":
+        return nil // No additional validation
+    case "verify-ca", "verify-full":
+        opts := x509.VerifyOptions{
+            Roots:         x509.NewCertPool(),
+            CurrentTime:   time.Now(),
+            DNSName:       state.ServerName,
+            Intermediates: x509.NewCertPool(),
+        }
+
+        if state.VerifiedChains != nil {
+            for _, chain := range state.VerifiedChains {
+                for _, cert := range chain {
+                    opts.Roots.AddCert(cert)
+                }
+            }
+        }
+
+        if _, err := state.PeerCertificates[0].Verify(opts); err != nil {
+            return fmt.Errorf("certificate validation failed: %w", err)
+        }
+
+        if sslMode == "verify-full" && expectedHost != state.ServerName {
+            return fmt.Errorf("hostname mismatch: expected %q, got %q", expectedHost, state.ServerName)
+        }
+    }
+
+    return nil
+}
+
+func printTLSDetails(conn *pgx.Conn, sslMode string) {
+    if sslMode == "disable" {
+        return
+    }
+
+    if stdlibConn, ok := conn.PgConn().Conn().(*stdlib.Conn); ok {
+        if tlsConn, ok := stdlibConn.Conn().(*tls.Conn); ok {
+            state := tlsConn.ConnectionState()
+            log.Printf("\033[36mTLS Details: %s %s (SNI: %s)\033[0m",
+                tlsVersionToString(state.Version),
+                tls.CipherSuiteName(state.CipherSuite),
+                state.ServerName)
+        }
+    }
+}
+
+func printSecuritySummary(pool *pgxpool.Pool, sslMode string) {
+    if sslMode == "disable" {
+        return
+    }
+
+    conn, err := pool.Acquire(context.Background())
+    if err != nil {
+        return
+    }
+    defer conn.Release()
+
+    var sslUsed bool
+    var cipher, version string
+    conn.QueryRow(context.Background(), "SELECT ssl_is_used()").Scan(&sslUsed)
+    
+    if sslUsed {
+        conn.QueryRow(context.Background(), 
+            "SELECT ssl_cipher(), ssl_version()").Scan(&cipher, &version)
+        log.Printf("\033[32mSSL Active: %s (%s)\033[0m", cipher, version)
+    } else {
+        log.Printf("\033[31mSSL Inactive (config: %s)\033[0m", sslMode)
+    }
+}
+
+func sslStatusString(sslMode string, pool *pgxpool.Pool) string {
+    conn, err := pool.Acquire(context.Background())
+    if err != nil {
+        return "status_unknown"
+    }
+    defer conn.Release()
+    
+    var sslUsed bool
+    conn.QueryRow(context.Background(), "SELECT ssl_is_used()").Scan(&sslUsed)
+    
+    if !sslUsed {
+        return "disabled"
+    }
+    return fmt.Sprintf("enabled (%s)", sslMode)
 }
 
 // ======================
@@ -303,13 +407,32 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 	if err != nil {
 		return nil, err
 	}
-    
+        if tlsConfig != nil && cfg.SSLVerbose {
+	    tlsConfig.VerifyConnection = func(state tls.ConnectionState) error {
+	        if err := verifySSLConnection(state, cfg.Host, cfg.SSLMode); err != nil {
+	            log.Printf("\033[31m⛔ SSL VALIDATION FAILURE: %v\033[0m", err)
+	            return err
+	        }
+	        if cfg.SSLMode == "verify-full" || cfg.SSLMode == "verify-ca" {
+	            log.Printf("\033[32m🔐 SSL VALIDATION SUCCESS: Mode=%s\033[0m", cfg.SSLMode)
+	        }
+	        return nil
+	    }
+	}
+	
 	parsedConfig.ConnConfig.TLSConfig = tlsConfig
 	parsedConfig.MaxConns = 3
 	parsedConfig.MinConns = 1
 	parsedConfig.MaxConnLifetime = 5 * time.Minute
 	parsedConfig.ConnConfig.ConnectTimeout = 10 * time.Second
 
+	if cfg.SSLMode != "disable" && cfg.SSLVerbose {
+	    parsedConfig.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+	        printTLSDetails(conn, cfg.SSLMode)
+	        return nil
+	    }
+	}
+	
 	pool, err := pgxpool.NewWithConfig(ctx, parsedConfig)
 	if err != nil {
 		return nil, &DatabaseError{
@@ -324,15 +447,19 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 	defer func() {
 		if err != nil {
 			pool.Close()
-			log.Println("Closed connection pool due to initialization failure")
+			fmt.Printf("Closed connection pool due to initialization failure")
 		}
 	}()
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		err = pool.Ping(ctx)
 		if err == nil {
-			fmt.Printf("\033[32m✅ Successfully connected to %s:%d\033[0m\n", cfg.Host, cfg.Port)
-			return pool, nil
+	            if cfg.SSLMode != "disable" && cfg.SSLVerbose {
+	                printSecuritySummary(pool, cfg.SSLMode)
+	            }
+		    fmt.Printf("\033[32m✅ Success: Connected to %s:%d [SSL:%s]\033[0m\n",
+                        cfg.Host, cfg.Port, sslStatusString(cfg.SSLMode, pool))
+		    return pool, nil
 		}
 
 		if isAuthError(err) {
@@ -367,6 +494,24 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 }
 
 func createTLSConfig(sslMode, sslRootCert, host string) (*tls.Config, error) {
+    validModes := map[string]bool{
+        "disable":     true,
+        "allow":      true,
+        "prefer":     true,
+        "require":    true,
+        "verify-ca":  true,
+        "verify-full": true,
+    }
+    if !validModes[sslMode] {
+        return nil, &ConfigError{
+            Operation: "ssl-config",
+            Variable:  "INIT_POSTGRES_SSLMODE",
+            Detail:    fmt.Sprintf("invalid SSL mode '%s'", sslMode),
+            Expected:  "one of: disable, allow, prefer, require, verify-ca, verify-full",
+            Err:       fmt.Errorf("invalid ssl mode"),
+        }
+    }
+
     if sslMode == "disable" {
         return nil, nil
     }
@@ -376,26 +521,35 @@ func createTLSConfig(sslMode, sslRootCert, host string) (*tls.Config, error) {
     }
 
     if sslMode == "verify-ca" || sslMode == "verify-full" {
-        if sslRootCert != "" {
-            certBytes, err := os.ReadFile(sslRootCert)
-            if err != nil {
-                return nil, &ConfigError{
-                    Operation: "ssl-config",
-                    Variable:  "INIT_POSTGRES_SSLROOTCERT",
-                    Detail:    "failed to read SSL certificate",
-                    Expected:  "valid certificate file",
-                    Err:       err,
-                }
+        if sslRootCert == "" {
+            return nil, &ConfigError{
+                Operation: "ssl-config",
+                Variable:  "INIT_POSTGRES_SSLROOTCERT",
+                Detail:    "missing CA certificate file",
+                Expected:  "path to root CA certificate",
+                Err:       fmt.Errorf("CA certificate required for mode '%s'", sslMode),
             }
+        }
 
-            tlsConfig.RootCAs = x509.NewCertPool()
-            if !tlsConfig.RootCAs.AppendCertsFromPEM(certBytes) {
-                return nil, &ConfigError{
-                    Operation: "ssl-config",
-                    Variable:  "INIT_POSTGRES_SSLROOTCERT",
-                    Detail:    "failed to parse SSL certificate",
-                    Expected:  "valid PEM-encoded certificate",
-                }
+        certBytes, err := os.ReadFile(sslRootCert)
+        if err != nil {
+            return nil, &ConfigError{
+                Operation: "ssl-config",
+                Variable:  "INIT_POSTGRES_SSLROOTCERT",
+                Detail:    fmt.Sprintf("failed to read CA certificate from '%s'", sslRootCert),
+                Expected:  "valid readable certificate file",
+                Err:       err,
+            }
+        }
+
+        tlsConfig.RootCAs = x509.NewCertPool()
+        if !tlsConfig.RootCAs.AppendCertsFromPEM(certBytes) {
+            return nil, &ConfigError{
+                Operation: "ssl-config",
+                Variable:  "INIT_POSTGRES_SSLROOTCERT",
+                Detail:    "failed to parse CA certificates",
+                Expected:  "PEM-encoded X.509 certificate(s)",
+                Err:       fmt.Errorf("invalid certificate format"),
             }
         }
 
@@ -587,7 +741,6 @@ func run() error {
 	}
 	defer func() {
 		pool.Close()
-		fmt.Printf("Closed database connection pool")
 	}()
 
 	if err := createUser(ctx, pool, cfg); err != nil {
