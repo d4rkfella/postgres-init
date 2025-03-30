@@ -185,16 +185,17 @@ func waitForPostgres(ctx context.Context, pool *pgxpool.Pool, cfg Config) error 
 func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	var exists int
 	err := pool.QueryRow(ctx, "SELECT 1 FROM pg_roles WHERE rolname = $1", cfg.User).Scan(&exists)
+
 	if err != nil && !strings.Contains(err.Error(), "no rows in result set") {
-		return fmt.Errorf("failed to check user existence: %w", err)
+		return fmt.Errorf("⚠️ Failed to check user existence: %w", err)
 	}
 
+	// If the user doesn't exist, create the user
 	if exists != 1 {
-		colorPrint(fmt.Sprintf("👤 Creating user %s...", cfg.User), Green)
+		colorPrint(fmt.Sprintf("👤 Creating user %s...", cfg.User), "green")
+		sql := fmt.Sprintf(`CREATE ROLE "%s" LOGIN ENCRYPTED PASSWORD '%s'`, cfg.User, cfg.UserPass)
 		
-		sql := `CREATE ROLE $1 LOGIN ENCRYPTED PASSWORD $2`
-		args := []interface{}{cfg.User, cfg.UserPass}
-
+		// Add user flags if any
 		if cfg.UserFlags != "" {
 			flags := strings.Fields(cfg.UserFlags)
 			for _, flag := range flags {
@@ -214,61 +215,50 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 				case "--no-superuser":
 					sql += " NOSUPERUSER"
 				default:
-					log.Printf("⚠️ Warning: Unsupported user flag: %s", flag)
+					if strings.HasPrefix(flag, "--") {
+						log.Printf("⚠️ Warning: Unsupported user flag: %s", flag)
+					}
 				}
 			}
 		}
 
-		if err := execWithErrorHandling(ctx, pool, sql, args...); err != nil {
-			return fmt.Errorf("failed to create user: %w", err)
+		if _, err = pool.Exec(ctx, sql); err != nil {
+			return fmt.Errorf("❌ Failed to create user: %w", err)
 		}
 	} else {
-		colorPrint(fmt.Sprintf("👤 Updating password for existing user %s...", cfg.User), Green)
-		sql := `ALTER ROLE $1 WITH ENCRYPTED PASSWORD $2`
-		args := []interface{}{cfg.User, cfg.UserPass}
+		colorPrint(fmt.Sprintf("👤 Updating password for existing user %s...", cfg.User), "green")
+		sql := fmt.Sprintf(`ALTER ROLE "%s" WITH ENCRYPTED PASSWORD '%s'`, cfg.User, cfg.UserPass)
 
-		if err := execWithErrorHandling(ctx, pool, sql, args...); err != nil {
-			return fmt.Errorf("failed to update user password: %w", err)
+		if _, err = pool.Exec(ctx, sql); err != nil {
+			return fmt.Errorf("❌ Failed to update user password: %w", err)
 		}
 	}
+
 	return nil
 }
 
 func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	var exists int
 	err := pool.QueryRow(ctx, "SELECT 1 FROM pg_database WHERE datname = $1", cfg.DBName).Scan(&exists)
+
 	if err != nil && !strings.Contains(err.Error(), "no rows in result set") {
-		return fmt.Errorf("failed to check database existence: %w", err)
+		return fmt.Errorf("⚠️ Failed to check database existence: %w", err)
 	}
 
 	if exists != 1 {
-		colorPrint(fmt.Sprintf("📦 Creating database %s...", cfg.DBName), Green)
-		sql := `CREATE DATABASE $1 OWNER $2`
-		args := []interface{}{cfg.DBName, cfg.User}
-
-		if err := execWithErrorHandling(ctx, pool, sql, args...); err != nil {
-			return fmt.Errorf("failed to create database: %w", err)
+		colorPrint(fmt.Sprintf("📦 Creating database %s...", cfg.DBName), "green")
+		sql := fmt.Sprintf(`CREATE DATABASE "%s" OWNER "%s"`, cfg.DBName, cfg.User)
+		if _, err = pool.Exec(ctx, sql); err != nil {
+			return fmt.Errorf("Failed to create database: %w", err)
 		}
 	}
 
-	colorPrint(fmt.Sprintf("🔑 Granting all privileges to user \"%s\" on database \"%s\"...", cfg.User, cfg.DBName), Green)
-	sql := `GRANT ALL PRIVILEGES ON DATABASE $1 TO $2`
-	args := []interface{}{cfg.DBName, cfg.User}
-
-	if err := execWithErrorHandling(ctx, pool, sql, args...); err != nil {
-		return fmt.Errorf("failed to grant privileges: %w", err)
+	colorPrint(fmt.Sprintf("🔑 Granting all privileges to user \"%s\" on database \"%s\"...", cfg.User, cfg.DBName), "green")
+	sql := fmt.Sprintf(`GRANT ALL PRIVILEGES ON DATABASE "%s" TO "%s"`, cfg.DBName, cfg.User)
+	if _, err = pool.Exec(ctx, sql); err != nil {
+	    return fmt.Errorf("❌ Failed to grant privileges: %w", err)
 	}
-
-	return nil
-}
-
-func execWithErrorHandling(ctx context.Context, pool *pgxpool.Pool, sql string, args ...interface{}) error {
-	log.Printf("Executing SQL: %s with args: %v", sql, args)
-
-	_, err := pool.Exec(ctx, sql, args...)
-	if err != nil {
-		return fmt.Errorf("failed to execute SQL: %s, args: %v, error: %w", sql, args, err)
-	}
+	
 	return nil
 }
 
