@@ -59,6 +59,10 @@ func main() {
 	colorPrint("Database initialization completed successfully", Green)
 }
 
+func quoteLiteral(literal string) string {
+	return "'" + strings.ReplaceAll(literal, "'", "''") + "'"
+}
+
 func run() error {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -245,7 +249,7 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 		sql := fmt.Sprintf(
 			`CREATE ROLE %s LOGIN ENCRYPTED PASSWORD %s`,
 			pgx.Identifier{cfg.User}.Sanitize(),
-			pgx.Literal(cfg.UserPass).Sanitize(),
+			quoteLiteral(cfg.UserPass),
 		)
 		
 		if cfg.UserFlags != "" {
@@ -286,7 +290,7 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 		sql := fmt.Sprintf(
 			`ALTER ROLE %s WITH ENCRYPTED PASSWORD %s`,
 			pgx.Identifier{cfg.User}.Sanitize(),
-			pgx.Literal(cfg.UserPass).Sanitize(),
+			quoteLiteral(cfg.UserPass),
 		)
 
 		if _, err = pool.Exec(ctx, sql); err != nil {
