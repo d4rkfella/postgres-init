@@ -222,60 +222,90 @@ func getEnvWithDefault(key, defaultValue string) string {
 }
 
 func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
-	config.ConnConfig.LogLevel = pgx.LogLevelDebug
-	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
-		url.QueryEscape(cfg.SuperUser), 
-		url.QueryEscape(cfg.SuperPass),
-		cfg.Host, 
-		cfg.Port, 
-		url.QueryEscape(cfg.SuperUser), 
-		cfg.SSLMode)
+    connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+        url.QueryEscape(cfg.SuperUser),
+        url.QueryEscape(cfg.SuperPass),
+        cfg.Host,
+        cfg.Port,
+        url.QueryEscape(cfg.SuperUser),
+        cfg.SSLMode)
 
-	if cfg.SSLRootCert != "" {
-		connStr += fmt.Sprintf("&sslrootcert=%s", url.QueryEscape(cfg.SSLRootCert))
-	}
-	config, err := pgxpool.ParseConfig(connStr)
-	if err != nil {
-		return nil, &DatabaseError{
-			Operation: "connection setup",
-			Detail:   fmt.Sprintf("invalid config for %s:%d", cfg.Host, cfg.Port),
-			Err:      err,
-		}
-	}
+    if cfg.SSLRootCert != "" {
+        connStr += fmt.Sprintf("&sslrootcert=%s", url.QueryEscape(cfg.SSLRootCert))
+    }
 
-	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		return nil, &DatabaseError{
-			Operation: "connection",
-			Detail:   fmt.Sprintf("failed to connect as '%s'", cfg.SuperUser),
-			Err:      err,
-		}
-	}
+    // Enable verbose logging
+    config, err := pgxpool.ParseConfig(connStr)
+    if err != nil {
+        return nil, &DatabaseError{
+            Operation: "connection setup",
+            Detail:   fmt.Sprintf("invalid config for %s:%d", cfg.Host, cfg.Port),
+            Err:      err,
+        }
+    }
 
-	return pool, nil
+    ctxShort, cancel := context.WithTimeout(ctx, 5*time.Second)
+    defer cancel()
+
+    pool, err := pgxpool.NewWithConfig(ctxShort, config)
+    if err != nil {
+        if isAuthError(err) {
+            return nil, &DatabaseError{
+                Operation: "authentication",
+                Detail:   "invalid credentials",
+                Err:      err,
+            }
+        }
+        return nil, &DatabaseError{
+            Operation: "connection",
+            Detail:   fmt.Sprintf("failed to connect as '%s'", cfg.SuperUser),
+            Err:      err,
+        }
+    }
+
+    return pool, nil
+}
+
+func isAuthError(err error) bool {
+    return strings.Contains(err.Error(), "password authentication failed") ||
+           strings.Contains(err.Error(), "role \"") ||
+           strings.Contains(err.Error(), "authentication failed")
 }
 
 func waitForPostgres(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
-	const timeout = 30 * time.Second
-	start := time.Now()
+    const timeout = 30 * time.Second
+    start := time.Now()
 
-	for {
-		if time.Since(start) > timeout {
-			return &DatabaseError{
-				Operation: "connection wait",
-				Detail:   fmt.Sprintf("timeout after %v for %s:%d", timeout, cfg.Host, cfg.Port),
-			}
-		}
+    for {
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        default:
+            if time.Since(start) > timeout {
+                return &DatabaseError{
+                    Operation: "connection wait",
+                    Detail:   fmt.Sprintf("timeout after %v for %s:%d", timeout, cfg.Host, cfg.Port),
+                }
+            }
 
-		err := pool.Ping(ctx)
-		if err == nil {
-			colorPrint(fmt.Sprintf("✅ Connected to PostgreSQL at %s:%d", cfg.Host, cfg.Port), Green)
-			return nil
-		}
+            err := pool.Ping(ctx)
+            if err == nil {
+                colorPrint(fmt.Sprintf("✅ Connected to PostgreSQL at %s:%d", cfg.Host, cfg.Port), Green)
+                return nil
+            }
 
-		colorPrint(fmt.Sprintf("⏳ Waiting for PostgreSQL at %s:%d...", cfg.Host, cfg.Port), Yellow)
-		time.Sleep(1 * time.Second)
-	}
+            if isAuthError(err) {
+                return &DatabaseError{
+                    Operation: "authentication",
+                    Detail:   "invalid credentials (retries skipped)",
+                    Err:      err,
+                }
+            }
+
+            colorPrint(fmt.Sprintf("⏳ Waiting for PostgreSQL at %s:%d... (%v)", cfg.Host, cfg.Port, err), Yellow)
+            time.Sleep(1 * time.Second)
+        }
+    }
 }
 
 func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
