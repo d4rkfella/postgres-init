@@ -222,6 +222,7 @@ func getEnvWithDefault(key, defaultValue string) string {
 }
 
 func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
+	config.ConnConfig.LogLevel = pgx.LogLevelDebug
 	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
 		url.QueryEscape(cfg.SuperUser), 
 		url.QueryEscape(cfg.SuperPass),
@@ -233,7 +234,6 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 	if cfg.SSLRootCert != "" {
 		connStr += fmt.Sprintf("&sslrootcert=%s", url.QueryEscape(cfg.SSLRootCert))
 	}
-
 	config, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
 		return nil, &DatabaseError{
