@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log"
@@ -15,7 +16,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	pgxssl "github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ======================
@@ -55,10 +55,11 @@ type ConfigError struct {
 	Detail    string
 	Variable  string
 	Expected  string
+	Err       error
 }
 
 func (e *ConfigError) Error() string {
-	return fmt.Sprintf(`
+	msg := fmt.Sprintf(`
 🔧 \033[1;33mCONFIG ERROR\033[0m
 ├─ \033[1;36mVariable:\033[0m %s
 ├─ \033[1;36mIssue:\033[0m    %s
@@ -66,6 +67,11 @@ func (e *ConfigError) Error() string {
 		highlight(e.Variable),
 		e.Detail,
 		e.Expected)
+
+	if e.Err != nil {
+		msg += fmt.Sprintf("\n\033[2mTechnical Details: %v\033[0m", e.Err)
+	}
+	return msg
 }
 
 // ======================
@@ -166,7 +172,6 @@ func loadConfig() (Config, error) {
 		}
 	}
 
-	// Validate passwords
 	if err := validatePassword(cfg.SuperPass); err != nil {
 		return Config{}, &ConfigError{
 			Operation: "validation",
@@ -274,7 +279,6 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 	const maxAttempts = 30
 	const baseDelay = 1 * time.Second
 
-	// Properly escape special characters
 	escapedUser := url.QueryEscape(cfg.SuperUser)
 	escapedPass := url.QueryEscape(cfg.SuperPass)
 	escapedDB := url.QueryEscape(cfg.SuperUser)
@@ -297,14 +301,12 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 		}
 	}
 
-	// Configure TLS
 	tlsConfig, err := createTLSConfig(cfg.SSLMode, cfg.SSLRootCert)
 	if err != nil {
 		return nil, err
 	}
 	parsedConfig.ConnConfig.TLSConfig = tlsConfig
 
-	// Pool settings
 	parsedConfig.MaxConns = 3
 	parsedConfig.MinConns = 1
 	parsedConfig.MaxConnLifetime = 5 * time.Minute
@@ -374,41 +376,40 @@ func createTLSConfig(sslMode, sslRootCert string) (*tls.Config, error) {
 		return nil, nil
 	}
 
-	sslConfig := &pgxssl.Config{
-		TLSConfig: &tls.Config{},
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: sslMode == "require",
 	}
 
-	switch sslMode {
-	case "require":
-		sslConfig.TLSConfig.InsecureSkipVerify = true
-	case "verify-ca", "verify-full":
+	if sslMode == "verify-ca" || sslMode == "verify-full" {
 		if sslRootCert != "" {
 			certBytes, err := os.ReadFile(sslRootCert)
 			if err != nil {
-				return nil, &DatabaseError{
+				return nil, &ConfigError{
 					Operation: "ssl-config",
-					Detail:   "failed to read SSL certificate",
-					Target:   sslRootCert,
-					Advice:   "Verify file permissions and path",
-					Err:      err,
+					Variable:  "INIT_POSTGRES_SSLROOTCERT",
+					Detail:    "failed to read SSL certificate",
+					Expected:  "valid certificate file",
+					Err:       err,
 				}
 			}
-			sslConfig.TLSConfig.RootCAs = x509.NewCertPool()
-			if ok := sslConfig.TLSConfig.RootCAs.AppendCertsFromPEM(certBytes); !ok {
-				return nil, &DatabaseError{
+			
+			tlsConfig.RootCAs = x509.NewCertPool()
+			if !tlsConfig.RootCAs.AppendCertsFromPEM(certBytes) {
+				return nil, &ConfigError{
 					Operation: "ssl-config",
-					Detail:   "failed to parse SSL certificate",
-					Target:   sslRootCert,
-					Advice:   "Verify certificate is in PEM format",
+					Variable:  "INIT_POSTGRES_SSLROOTCERT",
+					Detail:    "failed to parse SSL certificate",
+					Expected:  "valid PEM-encoded certificate",
 				}
 			}
 		}
+		
 		if sslMode == "verify-full" {
-			sslConfig.TLSConfig.ServerName = os.Getenv("INIT_POSTGRES_HOST")
+			tlsConfig.ServerName = os.Getenv("INIT_POSTGRES_HOST")
 		}
 	}
 
-	return sslConfig.TLSConfig, nil
+	return tlsConfig, nil
 }
 
 func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
@@ -420,7 +421,7 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 
 	var exists bool
 	err = tx.QueryRow(ctx, 
-		"SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1", 
+		"SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1)", 
 		cfg.User,
 	).Scan(&exists)
 
