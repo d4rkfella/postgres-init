@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
+        "github.com/jackc/pgx/v5/pgconn"
+        "github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ======================
@@ -59,19 +59,17 @@ type ConfigError struct {
 }
 
 func (e *ConfigError) Error() string {
-	msg := fmt.Sprintf(`
-🔧 \033[1;33mCONFIG ERROR\033[0m
-├─ \033[1;36mVariable:\033[0m %s
-├─ \033[1;36mIssue:\033[0m    %s
-╰─ \033[1;36mExpected:\033[0m %s`,
-		highlight(e.Variable),
-		e.Detail,
-		e.Expected)
-
-	if e.Err != nil {
-		msg += fmt.Sprintf("\n\033[2mTechnical Details: %v\033[0m", e.Err)
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("\n🔧 \033[1;33m%s CONFIGURATION ERROR\033[0m\n", strings.ToUpper(e.Operation)))
+	if e.Variable != "" {
+		sb.WriteString(fmt.Sprintf("├─ \033[1;36mVariable:\033[0m %s\n", e.Variable))
 	}
-	return msg
+	sb.WriteString(fmt.Sprintf("├─ \033[1;36mIssue:\033[0m    %s\n", e.Detail))
+	sb.WriteString(fmt.Sprintf("╰─ \033[1;36mExpected:\033[0m %s\n", e.Expected))
+	if e.Err != nil {
+		sb.WriteString(fmt.Sprintf("\n\033[2m🔧 Technical Details:\n%s\033[0m", e.Err))
+	}
+	return sb.String()
 }
 
 // ======================
@@ -112,7 +110,7 @@ func (c Config) String() string {
 // ======================
 
 func highlight(s string) string {
-	return fmt.Sprintf("\033[1;35m%s\033[0m", s)
+	return fmt.Sprintf("\033[1;36m%s\033[0m", s)
 }
 
 func redactString(s string) string {
@@ -305,7 +303,6 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 	if err != nil {
 		return nil, err
 	}
-	parsedConfig.ConnConfig.TLSConfig = tlsConfig
 
 	parsedConfig.MaxConns = 3
 	parsedConfig.MinConns = 1
@@ -333,7 +330,7 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		err = pool.Ping(ctx)
 		if err == nil {
-			colorPrint(fmt.Sprintf("✅ Successfully connected to %s:%d", cfg.Host, cfg.Port), "green")
+			fmt.Printf("\033[32m✅ Successfully connected to %s:%d\033[0m\n", cfg.Host, cfg.Port)
 			return pool, nil
 		}
 
@@ -350,9 +347,8 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 
 		if attempt < maxAttempts {
 			colorPrint(
-				fmt.Sprintf("⏳ Connection validation attempt %d/%d failed: %v. Retrying...", 
-					attempt, maxAttempts, err),
-				"yellow",
+				fmt.Printf("\033[33m⏳ Connection validation attempt %d/%d failed: %v. Retrying...\033[0m\n", 
+                                    attempt, maxAttempts, err)
 			)
 			select {
 			case <-time.After(baseDelay * time.Duration(attempt)):
@@ -405,7 +401,7 @@ func createTLSConfig(sslMode, sslRootCert string) (*tls.Config, error) {
 		}
 		
 		if sslMode == "verify-full" {
-			tlsConfig.ServerName = os.Getenv("INIT_POSTGRES_HOST")
+			tlsConfig.ServerName = cfg.Host
 		}
 	}
 
@@ -437,17 +433,17 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 
 	flags, err := parseUserFlags(cfg.UserFlags)
 	if err != nil {
-		return &DatabaseError{
-			Operation: "user-config",
-			Detail:   "invalid user flags",
-			Target:   cfg.UserFlags,
-			Advice:   "Use supported role flags",
-			Err:      err,
-		}
+	    return &DatabaseError{
+	        Operation: "user-config",
+	        Detail:   fmt.Sprintf("invalid flags: %v", err),
+	        Target:   cfg.UserFlags,
+	        Advice:   "Use --createdb, --createrole, etc.",
+	        Err:      err,
+	    }
 	}
 
 	if !exists {
-		colorPrint(fmt.Sprintf("👤 Creating user %s...", cfg.User), "green")
+		fmt.Printf("\033[32m👤 Creating user %s...\033[0m\n", cfg.User)
 		sql := fmt.Sprintf(
 			`CREATE ROLE %s LOGIN ENCRYPTED PASSWORD %s %s`,
 			pgx.Identifier{cfg.User}.Sanitize(),
@@ -465,7 +461,7 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 			}
 		}
 	} else {
-		colorPrint(fmt.Sprintf("👤 Updating role %s...", cfg.User), "green")
+		fmt.Printf("\033[32m👤 Updating role %s...\033[0m\n", cfg.User)
 		sql := fmt.Sprintf(
 			`ALTER ROLE %s WITH ENCRYPTED PASSWORD %s %s`,
 			pgx.Identifier{cfg.User}.Sanitize(),
@@ -525,7 +521,7 @@ func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	}
 
 	if !exists {
-		colorPrint(fmt.Sprintf("📦 Creating database %s...", cfg.DBName), "green")
+		fmt.Printf("\033[32m📦 Creating database %s...\033[0m\n", cfg.DBName)
 		sql := fmt.Sprintf(
 			`CREATE DATABASE %s OWNER %s`,
 			pgx.Identifier{cfg.DBName}.Sanitize(),
@@ -543,7 +539,7 @@ func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 		}
 	}
 
-	colorPrint(fmt.Sprintf("🔑 Granting privileges on %q to %q...", cfg.DBName, cfg.User), "green")
+	fmt.Printf("\033[32m🔑 Granting privileges on %q to %q...\033[0m\n", cfg.DBName, cfg.User)
 	sql := fmt.Sprintf(
 		`GRANT ALL PRIVILEGES ON DATABASE %s TO %s`,
 		pgx.Identifier{cfg.DBName}.Sanitize(),
@@ -569,25 +565,10 @@ func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 
 func main() {
 	if err := run(); err != nil {
-		colorPrint(err.Error(), "red")
+		fmt.Println(err)
 		os.Exit(1)
 	}
-	colorPrint("✅ Database initialization completed successfully", "green")
-}
-
-func colorPrint(text, color string) {
-	var colorCode string
-	switch color {
-	case "red":
-		colorCode = "\033[31m"
-	case "green":
-		colorCode = "\033[32m"
-	case "yellow":
-		colorCode = "\033[33m"
-	default:
-		colorCode = "\033[0m"
-	}
-	fmt.Printf("%s%s\033[0m\n", colorCode, text)
+	fmt.Printf("\033[32m✅ Database initialization completed successfully\033[0m\n")
 }
 
 func run() error {
@@ -596,7 +577,7 @@ func run() error {
 		return err
 	}
 	
-	log.Printf("📋 Loaded configuration:\n%s", cfg.String())
+	fmt.Printf("\033[34m📋 Loaded configuration:\n%s\033[0m\n", cfg.String())
 	
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -607,7 +588,7 @@ func run() error {
 	}
 	defer func() {
 		pool.Close()
-		log.Println("Closed database connection pool")
+		fmt.Printf("Closed database connection pool")
 	}()
 
 	if err := createUser(ctx, pool, cfg); err != nil {
