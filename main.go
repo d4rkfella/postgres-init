@@ -247,7 +247,13 @@ func getEnvWithDefault(key, defaultValue string) string {
 // Database Operations
 // ======================
 
-func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
+func connectAndWait(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
+    const (
+        maxAttempts = 30
+        baseDelay   = 1 * time.Second
+        maxDelay    = 5 * time.Second
+    )
+
     connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
         url.QueryEscape(cfg.SuperUser),
         url.QueryEscape(cfg.SuperPass),
@@ -264,28 +270,25 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
     if err != nil {
         return nil, &DatabaseError{
             Operation: "connection",
-            Detail:   "failed to parse connection string",
+            Detail:   "invalid connection parameters",
             Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-            Advice:   "Check connection parameters and SSL configuration",
+            Advice:   "Check host, port, and SSL configuration",
             Err:      err,
         }
     }
 
-    ctxShort, cancel := context.WithTimeout(ctx, 15*time.Second)
-    defer cancel()
+    config.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+        return conn.Ping(ctx)
+    }
 
-    pool, err := pgxpool.NewWithConfig(ctxShort, config)
-    if err != nil {
-        if ctxShort.Err() == context.DeadlineExceeded {
-            return nil, &DatabaseError{
-                Operation: "connection",
-                Detail:   "connection timed out during initial setup",
-                Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-                Advice:   "Check network latency or increase connection timeout",
-                Err:      err,
-            }
+    var pool *pgxpool.Pool
+    
+    for attempt := 1; attempt <= maxAttempts; attempt++ {
+        pool, err = pgxpool.NewWithConfig(ctx, config)
+        if err == nil {
+            break
         }
-        
+
         if isAuthError(err) {
             return nil, &DatabaseError{
                 Operation: "authentication",
@@ -297,57 +300,33 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
             }
         }
 
+        delay := time.Duration(attempt)*baseDelay
+        if delay > maxDelay {
+            delay = maxDelay
+        }
+
+        colorPrint(fmt.Sprintf("⏳ Connection attempt %d/%d failed: %v. Retrying in %v...", 
+            attempt, maxAttempts, err, delay), "yellow")
+        
+        select {
+        case <-time.After(delay):
+        case <-ctx.Done():
+            return nil, ctx.Err()
+        }
+    }
+
+    if err != nil {
         return nil, &DatabaseError{
             Operation: "connection",
-            Detail:   "failed to establish connection",
+            Detail:   fmt.Sprintf("failed after %d attempts", maxAttempts),
             Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-            Advice:   "Check if PostgreSQL is running and accessible",
+            Advice:   "Check database availability and network connectivity",
             Err:      err,
         }
     }
 
+    colorPrint(fmt.Sprintf("✅ Successfully connected to %s:%d", cfg.Host, cfg.Port), "green")
     return pool, nil
-}
-
-func waitForPostgres(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
-	const timeout = 30 * time.Second
-	start := time.Now()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			if time.Since(start) > timeout {
-				return &DatabaseError{
-					Operation: "connection",
-					Detail:   "connection timeout",
-					Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-					Advice:   "Check network connectivity and PostgreSQL status",
-				}
-			}
-
-			err := pool.Ping(ctx)
-			if err == nil {
-				colorPrint(fmt.Sprintf("✅ Connected to PostgreSQL at %s:%d", cfg.Host, cfg.Port), "green")
-				return nil
-			}
-
-			if isAuthError(err) {
-				return &DatabaseError{
-					Operation: "authentication",
-					Detail:   "invalid credentials during ping",
-					Target:   fmt.Sprintf("%s@%s:%d", cfg.SuperUser, cfg.Host, cfg.Port),
-					Code:     extractSQLState(err),
-					Advice:   "Verify credentials and retry",
-					Err:      err,
-				}
-			}
-
-			colorPrint(fmt.Sprintf("⏳ Waiting for PostgreSQL at %s:%d... (%v)", cfg.Host, cfg.Port, err), "yellow")
-			time.Sleep(1 * time.Second)
-		}
-	}
 }
 
 func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
@@ -507,29 +486,27 @@ func colorPrint(text, color string) {
 }
 
 func run() error {
-	cfg, err := loadConfig()
-	if err != nil {
-		return err
-	}
+    cfg, err := loadConfig()
+    if err != nil {
+        return err
+    }
 
-	ctx := context.Background()
-	pool, err := connectPostgres(ctx, cfg)
-	if err != nil {
-		return err
-	}
-	defer pool.Close()
+    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+    defer cancel()
 
-	if err := waitForPostgres(ctx, pool, cfg); err != nil {
-		return err
-	}
+    pool, err := connectAndWait(ctx, cfg)
+    if err != nil {
+        return err
+    }
+    defer pool.Close()
 
-	if err := createUser(ctx, pool, cfg); err != nil {
-		return err
-	}
+    if err := createUser(ctx, pool, cfg); err != nil {
+        return err
+    }
 
-	if err := createDatabase(ctx, pool, cfg); err != nil {
-		return err
-	}
+    if err := createDatabase(ctx, pool, cfg); err != nil {
+        return err
+    }
 
-	return nil
+    return nil
 }
