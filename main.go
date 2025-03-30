@@ -101,8 +101,13 @@ func loadConfig() (Config, error) {
 		return Config{}, err
 	}
 
+	host, err := mustGetEnv("INIT_POSTGRES_HOST")
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
-		Host:        mustGetEnv("INIT_POSTGRES_HOST"),
+		Host:        host,
 		Port:        port,
 		SuperUser:   superUser,
 		SuperPass:   superPass,
