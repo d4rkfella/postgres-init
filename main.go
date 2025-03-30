@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -33,38 +34,54 @@ const (
 	Default = "default"
 )
 
+type DatabaseError struct {
+	Operation string
+	Detail    string
+	Err       error
+}
+
+func (e *DatabaseError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("%s: %s (%v)", e.Operation, e.Detail, e.Err)
+	}
+	return fmt.Sprintf("%s: %s", e.Operation, e.Detail)
+}
+
+func (e *DatabaseError) Unwrap() error {
+	return e.Err
+}
+
 func main() {
 	if err := run(); err != nil {
 		colorPrint(fmt.Sprintf("❌ Error: %v", err), Red)
 		os.Exit(1)
 	}
-
 	colorPrint("Database initialization completed successfully", Green)
 }
 
 func run() error {
 	cfg, err := loadConfig()
 	if err != nil {
-		return fmt.Errorf("failed to load configuration: %w", err)
+		return fmt.Errorf("configuration failed: %w", err)
 	}
 
 	ctx := context.Background()
 	pool, err := connectPostgres(ctx, cfg)
 	if err != nil {
-		return fmt.Errorf("failed to connect to PostgreSQL: %w", err)
+		return err
 	}
 	defer pool.Close()
 
 	if err := waitForPostgres(ctx, pool, cfg); err != nil {
-		return fmt.Errorf("failed to connect to PostgreSQL: %w", err)
+		return err
 	}
 
 	if err := createUser(ctx, pool, cfg); err != nil {
-		return fmt.Errorf("failed to create user: %w", err)
+		return err
 	}
 
 	if err := createDatabase(ctx, pool, cfg); err != nil {
-		return fmt.Errorf("failed to create database: %w", err)
+		return err
 	}
 
 	return nil
@@ -73,40 +90,44 @@ func run() error {
 func loadConfig() (Config, error) {
 	port, err := strconv.Atoi(getEnvWithDefault("INIT_POSTGRES_PORT", "5432"))
 	if err != nil {
-		return Config{}, fmt.Errorf("invalid port number: %w", err)
+		return Config{}, &DatabaseError{
+			Operation: "config",
+			Detail:   "invalid port number",
+			Err:      err,
+		}
 	}
 
 	superUser, err := mustGetEnv("INIT_POSTGRES_SUPER_USER")
 	if err != nil {
-		return Config{}, err
+		return Config{}, wrapEnvError(err)
 	}
 
 	superPass, err := mustGetEnv("INIT_POSTGRES_SUPER_PASS")
 	if err != nil {
-		return Config{}, err
+		return Config{}, wrapEnvError(err)
 	}
 
 	user, err := mustGetEnv("INIT_POSTGRES_USER")
 	if err != nil {
-		return Config{}, err
+		return Config{}, wrapEnvError(err)
 	}
 
 	userPass, err := mustGetEnv("INIT_POSTGRES_PASS")
 	if err != nil {
-		return Config{}, err
+		return Config{}, wrapEnvError(err)
 	}
 
 	dbName, err := mustGetEnv("INIT_POSTGRES_DBNAME")
 	if err != nil {
-		return Config{}, err
+		return Config{}, wrapEnvError(err)
 	}
 
 	host, err := mustGetEnv("INIT_POSTGRES_HOST")
 	if err != nil {
-		return Config{}, err
+		return Config{}, wrapEnvError(err)
 	}
 
-	cfg := Config{
+	return Config{
 		Host:        host,
 		Port:        port,
 		SuperUser:   superUser,
@@ -117,8 +138,15 @@ func loadConfig() (Config, error) {
 		UserFlags:   os.Getenv("INIT_POSTGRES_USER_FLAGS"),
 		SSLMode:     getEnvWithDefault("INIT_POSTGRES_SSLMODE", "disable"),
 		SSLRootCert: os.Getenv("INIT_POSTGRES_SSLROOTCERT"),
+	}, nil
+}
+
+func wrapEnvError(err error) error {
+	return &DatabaseError{
+		Operation: "config",
+		Detail:   "missing environment variable",
+		Err:      err,
 	}
-	return cfg, nil
 }
 
 func mustGetEnv(key string) (string, error) {
@@ -139,47 +167,65 @@ func getEnvWithDefault(key, defaultValue string) string {
 
 func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
-		url.QueryEscape(cfg.SuperUser), url.QueryEscape(cfg.SuperPass),
-		cfg.Host, cfg.Port, url.QueryEscape(cfg.SuperUser), cfg.SSLMode)
+		url.QueryEscape(cfg.SuperUser), 
+		url.QueryEscape(cfg.SuperPass),
+		cfg.Host, 
+		cfg.Port, 
+		url.QueryEscape(cfg.SuperUser), 
+		cfg.SSLMode)
 
-	if (cfg.SSLMode == "verify-ca" || cfg.SSLMode == "verify-full") && cfg.SSLRootCert != "" {
+	if (cfg.SSLMode == "verify-ca" || cfg.SSLMode == "verify-full") && cfg.SSLRootCert == "" {
+		return nil, &DatabaseError{
+			Operation: "SSL configuration",
+			Detail:   fmt.Sprintf("SSL mode '%s' requires certificate", cfg.SSLMode),
+		}
+	}
+	if cfg.SSLRootCert != "" {
 		connStr += fmt.Sprintf("&sslrootcert=%s", url.QueryEscape(cfg.SSLRootCert))
-	} else if cfg.SSLMode == "verify-ca" || cfg.SSLMode == "verify-full" {
-		return nil, fmt.Errorf("SSL mode %s requires INIT_POSTGRES_SSLROOTCERT to be set", cfg.SSLMode)
 	}
 
 	config, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
-		return nil, fmt.Errorf("unable to parse connection config: %w", err)
+		return nil, &DatabaseError{
+			Operation: "connection setup",
+			Detail:   fmt.Sprintf("invalid config for %s:%d", cfg.Host, cfg.Port),
+			Err:      err,
+		}
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
-		return nil, fmt.Errorf("unable to connect to PostgreSQL: %w", err)
+		return nil, &DatabaseError{
+			Operation: "connection",
+			Detail:   fmt.Sprintf("failed to connect as '%s'", cfg.SuperUser),
+			Err:      err,
+		}
 	}
 
 	return pool, nil
 }
 
 func waitForPostgres(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
+	const timeout = 30 * time.Second
 	start := time.Now()
-	timeout := 30 * time.Second
 
 	for {
 		if time.Since(start) > timeout {
-			return fmt.Errorf("timeout waiting for PostgreSQL to become ready")
+			return &DatabaseError{
+				Operation: "connection wait",
+				Detail:   fmt.Sprintf("timeout after %v for %s:%d", timeout, cfg.Host, cfg.Port),
+			}
 		}
 
 		err := pool.Ping(ctx)
 		if err == nil {
 			colorPrint(fmt.Sprintf("✅ Connected to PostgreSQL at %s:%d", cfg.Host, cfg.Port), Green)
-			break
+			return nil
 		}
 
 		colorPrint(fmt.Sprintf("⏳ Waiting for PostgreSQL at %s:%d...", cfg.Host, cfg.Port), Yellow)
 		time.Sleep(1 * time.Second)
 	}
-	return nil
 }
 
 func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
@@ -187,12 +233,20 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	err := pool.QueryRow(ctx, "SELECT 1 FROM pg_roles WHERE rolname = $1", cfg.User).Scan(&exists)
 
 	if err != nil && !strings.Contains(err.Error(), "no rows in result set") {
-		return fmt.Errorf("failed to check user existence: %w", err)
+		return &DatabaseError{
+			Operation: "user check",
+			Detail:   fmt.Sprintf("failed to verify user '%s'", cfg.User),
+			Err:      err,
+		}
 	}
 
 	if exists != 1 {
-		colorPrint(fmt.Sprintf("👤 Creating user %s...", cfg.User), "green")
-		sql := fmt.Sprintf(`CREATE ROLE "%s" LOGIN ENCRYPTED PASSWORD '%s'`, cfg.User, cfg.UserPass)
+		colorPrint(fmt.Sprintf("👤 Creating user %s...", cfg.User), Green)
+		sql := fmt.Sprintf(
+			`CREATE ROLE %s LOGIN ENCRYPTED PASSWORD %s`,
+			pgx.Identifier{cfg.User}.Sanitize(),
+			pgx.Literal(cfg.UserPass).Sanitize(),
+		)
 		
 		if cfg.UserFlags != "" {
 			flags := strings.Fields(cfg.UserFlags)
@@ -221,17 +275,28 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 		}
 
 		if _, err = pool.Exec(ctx, sql); err != nil {
-			return fmt.Errorf("failed to create user: %w", err)
+			return &DatabaseError{
+				Operation: "user creation",
+				Detail:   fmt.Sprintf("failed to create user %s", pgx.Identifier{cfg.User}.Sanitize()),
+				Err:      err,
+			}
 		}
 	} else {
-		colorPrint(fmt.Sprintf("👤 Updating password for existing user %s...", cfg.User), "green")
-		sql := fmt.Sprintf(`ALTER ROLE "%s" WITH ENCRYPTED PASSWORD '%s'`, cfg.User, cfg.UserPass)
+		colorPrint(fmt.Sprintf("👤 Updating password for existing user %s...", cfg.User), Green)
+		sql := fmt.Sprintf(
+			`ALTER ROLE %s WITH ENCRYPTED PASSWORD %s`,
+			pgx.Identifier{cfg.User}.Sanitize(),
+			pgx.Literal(cfg.UserPass).Sanitize(),
+		)
 
 		if _, err = pool.Exec(ctx, sql); err != nil {
-			return fmt.Errorf("failed to update user password: %w", err)
+			return &DatabaseError{
+				Operation: "user update",
+				Detail:   fmt.Sprintf("failed to update user %s", pgx.Identifier{cfg.User}.Sanitize()),
+				Err:      err,
+			}
 		}
 	}
-
 	return nil
 }
 
@@ -240,21 +305,41 @@ func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	err := pool.QueryRow(ctx, "SELECT 1 FROM pg_database WHERE datname = $1", cfg.DBName).Scan(&exists)
 
 	if err != nil && !strings.Contains(err.Error(), "no rows in result set") {
-		return fmt.Errorf("failed to check database existence: %w", err)
-	}
-
-	if exists != 1 {
-		colorPrint(fmt.Sprintf("📦 Creating database %s...", cfg.DBName), "green")
-		sql := fmt.Sprintf(`CREATE DATABASE "%s" OWNER "%s"`, cfg.DBName, cfg.User)
-		if _, err = pool.Exec(ctx, sql); err != nil {
-			return fmt.Errorf("failed to create database: %w", err)
+		return &DatabaseError{
+			Operation: "database check",
+			Detail:   fmt.Sprintf("failed to verify database '%s'", cfg.DBName),
+			Err:      err,
 		}
 	}
 
-	colorPrint(fmt.Sprintf("🔑 Granting all privileges to user \"%s\" on database \"%s\"...", cfg.User, cfg.DBName), "green")
-	sql := fmt.Sprintf(`GRANT ALL PRIVILEGES ON DATABASE "%s" TO "%s"`, cfg.DBName, cfg.User)
+	if exists != 1 {
+		colorPrint(fmt.Sprintf("📦 Creating database %s...", cfg.DBName), Green)
+		sql := fmt.Sprintf(
+			`CREATE DATABASE %s OWNER %s`,
+			pgx.Identifier{cfg.DBName}.Sanitize(),
+			pgx.Identifier{cfg.User}.Sanitize(),
+		)
+		if _, err = pool.Exec(ctx, sql); err != nil {
+			return &DatabaseError{
+				Operation: "database creation",
+				Detail:   fmt.Sprintf("failed to create database %s", pgx.Identifier{cfg.DBName}.Sanitize()),
+				Err:      err,
+			}
+		}
+	}
+
+	colorPrint(fmt.Sprintf("🔑 Granting privileges to user %q on database %q...", cfg.User, cfg.DBName), Green)
+	sql := fmt.Sprintf(
+		`GRANT ALL PRIVILEGES ON DATABASE %s TO %s`,
+		pgx.Identifier{cfg.DBName}.Sanitize(),
+		pgx.Identifier{cfg.User}.Sanitize(),
+	)
 	if _, err = pool.Exec(ctx, sql); err != nil {
-	    return fmt.Errorf("failed to grant privileges: %w", err)
+		return &DatabaseError{
+			Operation: "privileges assignment",
+			Detail:   fmt.Sprintf("failed to grant privileges on %s", pgx.Identifier{cfg.DBName}.Sanitize()),
+			Err:      err,
+		}
 	}
 	
 	return nil
