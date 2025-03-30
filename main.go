@@ -126,9 +126,10 @@ func extractSQLState(err error) string {
 }
 
 func isAuthError(err error) bool {
-	return strings.Contains(err.Error(), "password authentication failed") ||
-		strings.Contains(err.Error(), "role \"") ||
-		strings.Contains(err.Error(), "authentication failed")
+    return strings.Contains(err.Error(), "password authentication failed") ||
+        strings.Contains(err.Error(), "role \"") ||
+        strings.Contains(err.Error(), "authentication failed") ||
+        strings.Contains(err.Error(), "SASL authentication failed")
 }
 
 func quoteLiteral(literal string) string {
@@ -247,54 +248,65 @@ func getEnvWithDefault(key, defaultValue string) string {
 // ======================
 
 func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
-	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
-		url.QueryEscape(cfg.SuperUser),
-		url.QueryEscape(cfg.SuperPass),
-		cfg.Host,
-		cfg.Port,
-		url.QueryEscape(cfg.SuperUser),
-		cfg.SSLMode)
+    connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+        url.QueryEscape(cfg.SuperUser),
+        url.QueryEscape(cfg.SuperPass),
+        cfg.Host,
+        cfg.Port,
+        url.QueryEscape(cfg.SuperUser),
+        cfg.SSLMode)
 
-	if cfg.SSLRootCert != "" {
-		connStr += fmt.Sprintf("&sslrootcert=%s", url.QueryEscape(cfg.SSLRootCert))
-	}
+    if cfg.SSLRootCert != "" {
+        connStr += fmt.Sprintf("&sslrootcert=%s", url.QueryEscape(cfg.SSLRootCert))
+    }
 
-	config, err := pgxpool.ParseConfig(connStr)
-	if err != nil {
-		return nil, &DatabaseError{
-			Operation: "connection",
-			Detail:   "failed to parse connection string",
-			Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-			Advice:   "Check connection parameters and SSL configuration",
-			Err:      err,
-		}
-	}
+    config, err := pgxpool.ParseConfig(connStr)
+    if err != nil {
+        return nil, &DatabaseError{
+            Operation: "connection",
+            Detail:   "failed to parse connection string",
+            Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+            Advice:   "Check connection parameters and SSL configuration",
+            Err:      err,
+        }
+    }
 
-	ctxShort, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
+    ctxShort, cancel := context.WithTimeout(ctx, 15*time.Second)
+    defer cancel()
 
-	pool, err := pgxpool.NewWithConfig(ctxShort, config)
-	if err != nil {
-		if isAuthError(err) {
-			return nil, &DatabaseError{
-				Operation: "authentication",
-				Detail:   "invalid credentials",
-				Target:   fmt.Sprintf("%s@%s:%d", cfg.SuperUser, cfg.Host, cfg.Port),
-				Code:     extractSQLState(err),
-				Advice:   "Verify INIT_POSTGRES_SUPER_USER and INIT_POSTGRES_SUPER_PASS",
-				Err:      err,
-			}
-		}
-		return nil, &DatabaseError{
-			Operation: "connection",
-			Detail:   "failed to establish connection",
-			Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-			Advice:   "Check if PostgreSQL is running and accessible",
-			Err:      err,
-		}
-	}
+    pool, err := pgxpool.NewWithConfig(ctxShort, config)
+    if err != nil {
+        if ctxShort.Err() == context.DeadlineExceeded {
+            return nil, &DatabaseError{
+                Operation: "connection",
+                Detail:   "connection timed out during initial setup",
+                Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+                Advice:   "Check network latency or increase connection timeout",
+                Err:      err,
+            }
+        }
+        
+        if isAuthError(err) {
+            return nil, &DatabaseError{
+                Operation: "authentication",
+                Detail:   "invalid credentials",
+                Target:   fmt.Sprintf("%s@%s:%d", cfg.SuperUser, cfg.Host, cfg.Port),
+                Code:     extractSQLState(err),
+                Advice:   "Verify INIT_POSTGRES_SUPER_USER and INIT_POSTGRES_SUPER_PASS",
+                Err:      err,
+            }
+        }
 
-	return pool, nil
+        return nil, &DatabaseError{
+            Operation: "connection",
+            Detail:   "failed to establish connection",
+            Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+            Advice:   "Check if PostgreSQL is running and accessible",
+            Err:      err,
+        }
+    }
+
+    return pool, nil
 }
 
 func waitForPostgres(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
