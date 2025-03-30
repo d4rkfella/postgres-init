@@ -87,6 +87,7 @@ type Config struct {
 	UserFlags   string
 	SSLMode     string
 	SSLRootCert string
+	SSLVerbose   bool
 }
 
 func (c Config) String() string {
@@ -114,6 +115,18 @@ func (c Config) String() string {
 // ======================
 // Helper Functions
 // ======================
+func getBoolEnv(key string, defaultValue bool) bool {
+    value := strings.ToLower(os.Getenv(key))
+    switch value {
+    case "true", "1", "on", "yes":
+        return true
+    case "false", "0", "off", "no", "":
+        return false
+    default:
+        log.Printf("⚠️ Invalid boolean value '%s' for %s, using default %t", value, key, defaultValue)
+        return defaultValue
+    }
+}
 
 func highlight(s string) string {
 	return fmt.Sprintf("\033[1;36m%s\033[0m", s)
@@ -153,15 +166,13 @@ func verifySSLConnection(state tls.ConnectionState, expectedHost, sslMode string
         return nil
     }
 
-    // Basic certificate checks for all secure modes
     if len(state.PeerCertificates) == 0 {
         return errors.New("no server certificates presented")
     }
 
-    // Mode-specific validation
     switch sslMode {
     case "require":
-        return nil // No additional validation
+        return nil
     case "verify-ca", "verify-full":
         opts := x509.VerifyOptions{
             Roots:         x509.NewCertPool(),
@@ -195,15 +206,18 @@ func printTLSDetails(conn *pgx.Conn, sslMode string) {
         return
     }
 
-    if stdlibConn, ok := conn.PgConn().Conn().(*stdlib.Conn); ok {
-        if tlsConn, ok := stdlibConn.Conn().(*tls.Conn); ok {
-            state := tlsConn.ConnectionState()
-            log.Printf("\033[36mTLS Details: %s %s (SNI: %s)\033[0m",
-                tlsVersionToString(state.Version),
-                tls.CipherSuiteName(state.CipherSuite),
-                state.ServerName)
-        }
+    rawConn := conn.PgConn().Conn()
+    tlsConn, ok := rawConn.(*tls.Conn)
+    if !ok {
+        log.Println("\033[33m⚠️ Connection is not using TLS\033[0m")
+        return
     }
+
+    state := tlsConn.ConnectionState()
+    log.Printf("\033[36mTLS Details: %s %s (SNI: %s)\033[0m",
+        tlsVersionToString(state.Version),
+        tls.CipherSuiteName(state.CipherSuite),
+        state.ServerName)
 }
 
 func printSecuritySummary(pool *pgxpool.Pool, sslMode string) {
@@ -244,6 +258,80 @@ func sslStatusString(sslMode string, pool *pgxpool.Pool) string {
         return "disabled"
     }
     return fmt.Sprintf("enabled (%s)", sslMode)
+}
+
+func tlsVersionToString(version uint16) string {
+    switch version {
+    case tls.VersionTLS13:
+        return "TLS 1.3"
+    case tls.VersionTLS12:
+        return "TLS 1.2"
+    case tls.VersionTLS11:
+        return "TLS 1.1"
+    case tls.VersionTLS10:
+        return "TLS 1.0"
+    default:
+        return fmt.Sprintf("Unknown (0x%04x)", version)
+    }
+}
+
+func validatePassword(pass string) error {
+	if len(pass) < 12 {
+		return fmt.Errorf("minimum 12 characters required")
+	}
+	return nil
+}
+
+func validateSSLConfig(sslMode, sslRootCert string, sslVerbose bool) error {
+	allowedModes := map[string]bool{
+		"disable": true, "allow": true, "prefer": true,
+		"require": true, "verify-ca": true, "verify-full": true,
+	}
+
+	if !allowedModes[sslMode] {
+		return &ConfigError{
+			Operation: "validation",
+			Variable:  "INIT_POSTGRES_SSLMODE",
+			Detail:    "invalid SSL mode",
+			Expected:  "one of: disable, allow, prefer, require, verify-ca, verify-full",
+		}
+	}
+
+	if sslMode == "verify-ca" || sslMode == "verify-full" {
+		if sslRootCert == "" {
+			return &ConfigError{
+				Operation: "validation",
+				Variable:  "INIT_POSTGRES_SSLROOTCERT",
+				Detail:    "SSL certificate required",
+				Expected:  "path to SSL root certificate",
+			}
+		}
+		if _, err := os.Stat(sslRootCert); err != nil {
+			return &ConfigError{
+				Operation: "validation",
+				Variable:  "INIT_POSTGRES_SSLROOTCERT",
+				Detail:    "SSL certificate file not found",
+				Expected:  "valid path to CA certificate file",
+				Err:       err,
+			}
+		}
+	}
+
+	return nil
+}
+
+func getRequiredEnv(key string) (string, error) {
+	if value := os.Getenv(key); value != "" {
+		return value, nil
+	}
+	return "", fmt.Errorf("not set")
+}
+
+func getEnvWithDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
 }
 
 // ======================
@@ -306,71 +394,13 @@ func loadConfig() (Config, error) {
 	cfg.UserFlags = os.Getenv("INIT_POSTGRES_USER_FLAGS")
 	cfg.SSLMode = getEnvWithDefault("INIT_POSTGRES_SSLMODE", "disable")
 	cfg.SSLRootCert = os.Getenv("INIT_POSTGRES_SSLROOTCERT")
+	cfg.SSLVerbose = getBoolEnv("INIT_POSTGRES_SSL_VERBOSE", false)
 
-	if err := validateSSLConfig(cfg.SSLMode, cfg.SSLRootCert); err != nil {
+	if err := validateSSLConfig(cfg.SSLMode, cfg.SSLRootCert, cfg.SSLVerbose); err != nil {
 		return Config{}, err
 	}
 
 	return cfg, nil
-}
-
-func validatePassword(pass string) error {
-	if len(pass) < 12 {
-		return fmt.Errorf("minimum 12 characters required")
-	}
-	return nil
-}
-
-func validateSSLConfig(sslMode, sslRootCert string) error {
-	allowedModes := map[string]bool{
-		"disable": true, "allow": true, "prefer": true,
-		"require": true, "verify-ca": true, "verify-full": true,
-	}
-
-	if !allowedModes[sslMode] {
-		return &ConfigError{
-			Operation: "validation",
-			Variable:  "INIT_POSTGRES_SSLMODE",
-			Detail:    "invalid SSL mode",
-			Expected:  "one of: disable, allow, prefer, require, verify-ca, verify-full",
-		}
-	}
-
-	if sslMode == "verify-ca" || sslMode == "verify-full" {
-		if sslRootCert == "" {
-			return &ConfigError{
-				Operation: "validation",
-				Variable:  "INIT_POSTGRES_SSLROOTCERT",
-				Detail:    "SSL certificate required",
-				Expected:  "path to SSL root certificate",
-			}
-		}
-		if _, err := os.Stat(sslRootCert); err != nil {
-			return &ConfigError{
-				Operation: "validation",
-				Variable:  "INIT_POSTGRES_SSLROOTCERT",
-				Detail:    "SSL certificate file not found",
-				Expected:  "valid path to CA certificate file",
-				Err:       err,
-			}
-		}
-	}
-
-	return nil
-}
-
-func getRequiredEnv(key string) (string, error) {
-	if value := os.Getenv(key); value != "" {
-		return value, nil
-	}
-	return "", fmt.Errorf("not set")
-}
-
-func getEnvWithDefault(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
 }
 
 // ======================
@@ -494,24 +524,6 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 }
 
 func createTLSConfig(sslMode, sslRootCert, host string) (*tls.Config, error) {
-    validModes := map[string]bool{
-        "disable":     true,
-        "allow":      true,
-        "prefer":     true,
-        "require":    true,
-        "verify-ca":  true,
-        "verify-full": true,
-    }
-    if !validModes[sslMode] {
-        return nil, &ConfigError{
-            Operation: "ssl-config",
-            Variable:  "INIT_POSTGRES_SSLMODE",
-            Detail:    fmt.Sprintf("invalid SSL mode '%s'", sslMode),
-            Expected:  "one of: disable, allow, prefer, require, verify-ca, verify-full",
-            Err:       fmt.Errorf("invalid ssl mode"),
-        }
-    }
-
     if sslMode == "disable" {
         return nil, nil
     }
