@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-        "github.com/jackc/pgx/v5/pgconn"
-        "github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ======================
@@ -23,7 +23,7 @@ import (
 // ======================
 
 type DatabaseError struct {
-	Operation string 
+	Operation string
 	Detail    string
 	Err       error
 	Target    string
@@ -131,9 +131,9 @@ func extractSQLState(err error) string {
 func isAuthError(err error) bool {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
-		return pgErr.Severity == "FATAL" && 
+		return pgErr.Severity == "FATAL" &&
 			(pgErr.Code == "28P01" || // invalid_password
-			 pgErr.Code == "28000")   // invalid_authorization
+				pgErr.Code == "28000") // invalid_authorization
 	}
 	return false
 }
@@ -178,7 +178,7 @@ func loadConfig() (Config, error) {
 			Expected:  err.Error(),
 		}
 	}
-	
+
 	if err := validatePassword(cfg.UserPass); err != nil {
 		return Config{}, &ConfigError{
 			Operation: "validation",
@@ -219,7 +219,7 @@ func validatePassword(pass string) error {
 
 func validateSSLConfig(sslMode, sslRootCert string) error {
 	allowedModes := map[string]bool{
-		"disable": true, "allow": true, "prefer": true, 
+		"disable": true, "allow": true, "prefer": true,
 		"require": true, "verify-ca": true, "verify-full": true,
 	}
 
@@ -247,7 +247,7 @@ func validateSSLConfig(sslMode, sslRootCert string) error {
 				Variable:  "INIT_POSTGRES_SSLROOTCERT",
 				Detail:    "SSL certificate file not found",
 				Expected:  "valid path to CA certificate file",
-				Err:      err,
+				Err:       err,
 			}
 		}
 	}
@@ -292,10 +292,10 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 	if err != nil {
 		return nil, &DatabaseError{
 			Operation: "configuration",
-			Detail:   "invalid connection parameters",
-			Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-			Advice:   "Check special characters in credentials",
-			Err:      err,
+			Detail:    "invalid connection parameters",
+			Target:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+			Advice:    "Check special characters in credentials",
+			Err:       err,
 		}
 	}
 
@@ -313,10 +313,10 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 	if err != nil {
 		return nil, &DatabaseError{
 			Operation: "connection",
-			Detail:   "failed to create connection pool",
-			Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-			Advice:   "Verify network connectivity and credentials",
-			Err:      err,
+			Detail:    "failed to create connection pool",
+			Target:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+			Advice:    "Verify network connectivity and credentials",
+			Err:       err,
 		}
 	}
 
@@ -337,19 +337,17 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 		if isAuthError(err) {
 			return nil, &DatabaseError{
 				Operation: "authentication",
-				Detail:   "invalid credentials",
-				Target:   fmt.Sprintf("%s@%s:%d", cfg.SuperUser, cfg.Host, cfg.Port),
-				Code:     extractSQLState(err),
-				Advice:   "Verify INIT_POSTGRES_SUPER_USER and INIT_POSTGRES_SUPER_PASS",
-				Err:      err,
+				Detail:    "invalid credentials",
+				Target:    fmt.Sprintf("%s@%s:%d", cfg.SuperUser, cfg.Host, cfg.Port),
+				Code:      extractSQLState(err),
+				Advice:    "Verify INIT_POSTGRES_SUPER_USER and INIT_POSTGRES_SUPER_PASS",
+				Err:       err,
 			}
 		}
 
 		if attempt < maxAttempts {
-			colorPrint(
-				fmt.Printf("\033[33m⏳ Connection validation attempt %d/%d failed: %v. Retrying...\033[0m\n", 
-                                    attempt, maxAttempts, err)
-			)
+			fmt.Printf("\033[33m⏳ Connection validation attempt %d/%d failed: %v. Retrying...\033[0m\n",
+				attempt, maxAttempts, err)
 			select {
 			case <-time.After(baseDelay * time.Duration(attempt)):
 			case <-ctx.Done():
@@ -360,10 +358,10 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 
 	return nil, &DatabaseError{
 		Operation: "connection",
-		Detail:   fmt.Sprintf("failed after %d validation attempts", maxAttempts),
-		Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Advice:   "Check database availability and network stability",
-		Err:      err,
+		Detail:    fmt.Sprintf("failed after %d validation attempts", maxAttempts),
+		Target:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		Advice:    "Check database availability and network stability",
+		Err:       err,
 	}
 }
 
@@ -388,7 +386,7 @@ func createTLSConfig(sslMode, sslRootCert string) (*tls.Config, error) {
 					Err:       err,
 				}
 			}
-			
+
 			tlsConfig.RootCAs = x509.NewCertPool()
 			if !tlsConfig.RootCAs.AppendCertsFromPEM(certBytes) {
 				return nil, &ConfigError{
@@ -399,7 +397,7 @@ func createTLSConfig(sslMode, sslRootCert string) (*tls.Config, error) {
 				}
 			}
 		}
-		
+
 		if sslMode == "verify-full" {
 			tlsConfig.ServerName = cfg.Host
 		}
@@ -416,30 +414,30 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	defer tx.Rollback(ctx)
 
 	var exists bool
-	err = tx.QueryRow(ctx, 
-		"SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1)", 
+	err = tx.QueryRow(ctx,
+		"SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1)",
 		cfg.User,
 	).Scan(&exists)
 
 	if err != nil {
 		return &DatabaseError{
 			Operation: "user check",
-			Detail:   fmt.Sprintf("failed to verify user %q", cfg.User),
-			Target:   cfg.User,
-			Advice:   "Check database permissions and connection",
-			Err:      err,
+			Detail:    fmt.Sprintf("failed to verify user %q", cfg.User),
+			Target:    cfg.User,
+			Advice:    "Check database permissions and connection",
+			Err:       err,
 		}
 	}
 
 	flags, err := parseUserFlags(cfg.UserFlags)
 	if err != nil {
-	    return &DatabaseError{
-	        Operation: "user-config",
-	        Detail:   fmt.Sprintf("invalid flags: %v", err),
-	        Target:   cfg.UserFlags,
-	        Advice:   "Use --createdb, --createrole, etc.",
-	        Err:      err,
-	    }
+		return &DatabaseError{
+			Operation: "user-config",
+			Detail:    fmt.Sprintf("invalid flags: %v", err),
+			Target:    cfg.UserFlags,
+			Advice:    "Use --createdb, --createrole, etc.",
+			Err:       err,
+		}
 	}
 
 	if !exists {
@@ -454,10 +452,10 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 		if _, err = tx.Exec(ctx, sql); err != nil {
 			return &DatabaseError{
 				Operation: "user creation",
-				Detail:   fmt.Sprintf("failed to create user %s", pgx.Identifier{cfg.User}.Sanitize()),
-				Target:   cfg.User,
-				Advice:   "Verify user creation privileges",
-				Err:      err,
+				Detail:    fmt.Sprintf("failed to create user %s", pgx.Identifier{cfg.User}.Sanitize()),
+				Target:    cfg.User,
+				Advice:    "Verify user creation privileges",
+				Err:       err,
 			}
 		}
 	} else {
@@ -472,10 +470,10 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 		if _, err = tx.Exec(ctx, sql); err != nil {
 			return &DatabaseError{
 				Operation: "user update",
-				Detail:   fmt.Sprintf("failed to update role %s", pgx.Identifier{cfg.User}.Sanitize()),
-				Target:   cfg.User,
-				Advice:   "Check password requirements and user permissions",
-				Err:      err,
+				Detail:    fmt.Sprintf("failed to update role %s", pgx.Identifier{cfg.User}.Sanitize()),
+				Target:    cfg.User,
+				Advice:    "Check password requirements and user permissions",
+				Err:       err,
 			}
 		}
 	}
@@ -487,7 +485,7 @@ func parseUserFlags(flags string) (string, error) {
 	var validFlags []string
 	for _, flag := range strings.Fields(flags) {
 		switch flag {
-		case "--createdb", "--createrole", "--inherit", "--no-login", 
+		case "--createdb", "--createrole", "--inherit", "--no-login",
 			"--replication", "--superuser", "--no-superuser":
 			validFlags = append(validFlags, strings.TrimPrefix(flag, "--"))
 		default:
@@ -513,10 +511,10 @@ func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	if err != nil {
 		return &DatabaseError{
 			Operation: "database check",
-			Detail:   fmt.Sprintf("failed to verify database %q", cfg.DBName),
-			Target:   cfg.DBName,
-			Advice:   "Check database connection and permissions",
-			Err:      err,
+			Detail:    fmt.Sprintf("failed to verify database %q", cfg.DBName),
+			Target:    cfg.DBName,
+			Advice:    "Check database connection and permissions",
+			Err:       err,
 		}
 	}
 
@@ -531,10 +529,10 @@ func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 		if _, err = tx.Exec(ctx, sql); err != nil {
 			return &DatabaseError{
 				Operation: "database creation",
-				Detail:   fmt.Sprintf("failed to create database %s", pgx.Identifier{cfg.DBName}.Sanitize()),
-				Target:   cfg.DBName,
-				Advice:   "Verify user has CREATEDB privilege",
-				Err:      err,
+				Detail:    fmt.Sprintf("failed to create database %s", pgx.Identifier{cfg.DBName}.Sanitize()),
+				Target:    cfg.DBName,
+				Advice:    "Verify user has CREATEDB privilege",
+				Err:       err,
 			}
 		}
 	}
@@ -549,10 +547,10 @@ func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	if _, err = tx.Exec(ctx, sql); err != nil {
 		return &DatabaseError{
 			Operation: "privileges assignment",
-			Detail:   fmt.Sprintf("failed to grant privileges on %s", pgx.Identifier{cfg.DBName}.Sanitize()),
-			Target:   cfg.DBName,
-			Advice:   "Check user permissions and database ownership",
-			Err:      err,
+			Detail:    fmt.Sprintf("failed to grant privileges on %s", pgx.Identifier{cfg.DBName}.Sanitize()),
+			Target:    cfg.DBName,
+			Advice:    "Check user permissions and database ownership",
+			Err:       err,
 		}
 	}
 
@@ -576,9 +574,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	
+
 	fmt.Printf("\033[34m📋 Loaded configuration:\n%s\033[0m\n", cfg.String())
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
