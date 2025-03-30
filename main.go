@@ -76,14 +76,39 @@ func loadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("invalid port number: %w", err)
 	}
 
+	superUser, err := mustGetEnv("INIT_POSTGRES_SUPER_USER")
+	if err != nil {
+		return Config{}, err
+	}
+
+	superPass, err := mustGetEnv("INIT_POSTGRES_SUPER_PASS")
+	if err != nil {
+		return Config{}, err
+	}
+
+	user, err := mustGetEnv("INIT_POSTGRES_USER")
+	if err != nil {
+		return Config{}, err
+	}
+
+	userPass, err := mustGetEnv("INIT_POSTGRES_PASS")
+	if err != nil {
+		return Config{}, err
+	}
+
+	dbName, err := mustGetEnv("INIT_POSTGRES_DBNAME")
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		Host:        mustGetEnv("INIT_POSTGRES_HOST"),
 		Port:        port,
-		SuperUser:   getEnvWithDefault("INIT_POSTGRES_SUPER_USER", "postgres"),
-		SuperPass:   mustGetEnv("INIT_POSTGRES_SUPER_PASS"),
-		User:        mustGetEnv("INIT_POSTGRES_USER"),
-		UserPass:    mustGetEnv("INIT_POSTGRES_PASS"),
-		DBName:      mustGetEnv("INIT_POSTGRES_DBNAME"),
+		SuperUser:   superUser,
+		SuperPass:   superPass,
+		User:        user,
+		UserPass:    userPass,
+		DBName:      dbName,
 		UserFlags:   os.Getenv("INIT_POSTGRES_USER_FLAGS"),
 		SSLMode:     getEnvWithDefault("INIT_POSTGRES_SSLMODE", "disable"),
 		SSLRootCert: os.Getenv("INIT_POSTGRES_SSLROOTCERT"),
@@ -91,12 +116,12 @@ func loadConfig() (Config, error) {
 	return cfg, nil
 }
 
-func mustGetEnv(key string) string {
+func mustGetEnv(key string) (string, error) {
 	value := os.Getenv(key)
 	if value == "" {
-		return ""
+		return "", fmt.Errorf("required environment variable %s is not set", key)
 	}
-	return value
+	return value, nil
 }
 
 func getEnvWithDefault(key, defaultValue string) string {
@@ -155,7 +180,6 @@ func waitForPostgres(ctx context.Context, pool *pgxpool.Pool, cfg Config) error 
 func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	var exists int
 	err := pool.QueryRow(ctx, "SELECT 1 FROM pg_roles WHERE rolname = $1", cfg.User).Scan(&exists)
-
 	if err != nil && !strings.Contains(err.Error(), "no rows in result set") {
 		return fmt.Errorf("failed to check user existence: %w", err)
 	}
@@ -165,6 +189,7 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 		sql := `CREATE ROLE $1 LOGIN ENCRYPTED PASSWORD $2`
 		args := []interface{}{cfg.User, cfg.UserPass}
 
+		// Adding flags dynamically
 		if cfg.UserFlags != "" {
 			flags := strings.Fields(cfg.UserFlags)
 			for _, flag := range flags {
@@ -184,13 +209,12 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 				case "--no-superuser":
 					sql += " NOSUPERUSER"
 				default:
-					if strings.HasPrefix(flag, "--") {
-						log.Printf("⚠️ Warning: Unsupported user flag: %s", flag)
-					}
+					log.Printf("⚠️ Warning: Unsupported user flag: %s", flag)
 				}
 			}
 		}
 
+		// Execute the SQL
 		if err := execWithErrorHandling(ctx, pool, sql, args...); err != nil {
 			return fmt.Errorf("failed to create user: %w", err)
 		}
@@ -203,14 +227,12 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 			return fmt.Errorf("failed to update user password: %w", err)
 		}
 	}
-
 	return nil
 }
 
 func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	var exists int
 	err := pool.QueryRow(ctx, "SELECT 1 FROM pg_database WHERE datname = $1", cfg.DBName).Scan(&exists)
-
 	if err != nil && !strings.Contains(err.Error(), "no rows in result set") {
 		return fmt.Errorf("failed to check database existence: %w", err)
 	}
