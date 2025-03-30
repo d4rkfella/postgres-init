@@ -219,7 +219,7 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 			}
 		}
 
-		// Execute the SQL
+		// Execute the SQL with the parameters
 		if err := execWithErrorHandling(ctx, pool, sql, args...); err != nil {
 			return fmt.Errorf("failed to create user: %w", err)
 		}
