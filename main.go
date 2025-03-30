@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"net/url"
 	"strings"
 	"strconv"
 	"time"
@@ -186,30 +187,41 @@ func loadConfig() (Config, error) {
 }
 
 func validateSSLConfig(sslMode, sslRootCert string) error {
-	allowedModes := map[string]bool{
-		"disable": true, "allow": true, "prefer": true, 
-		"require": true, "verify-ca": true, "verify-full": true,
-	}
+    allowedModes := map[string]bool{
+        "disable": true, "allow": true, "prefer": true, 
+        "require": true, "verify-ca": true, "verify-full": true,
+    }
 
-	if !allowedModes[sslMode] {
-		return &ConfigError{
-			Operation: "validation",
-			Variable:  "INIT_POSTGRES_SSLMODE",
-			Detail:    "invalid SSL mode",
-			Expected:  "one of: disable, allow, prefer, require, verify-ca, verify-full",
-		}
-	}
+    if !allowedModes[sslMode] {
+        return &ConfigError{
+            Operation: "validation",
+            Variable:  "INIT_POSTGRES_SSLMODE",
+            Detail:    "invalid SSL mode",
+            Expected:  "one of: disable, allow, prefer, require, verify-ca, verify-full",
+        }
+    }
 
-	if (sslMode == "verify-ca" || sslMode == "verify-full") && sslRootCert == "" {
-		return &ConfigError{
-			Operation: "validation",
-			Variable:  "INIT_POSTGRES_SSLROOTCERT",
-			Detail:    "SSL certificate required",
-			Expected:  "path to SSL root certificate",
-		}
-	}
+    if (sslMode == "verify-ca" || sslMode == "verify-full") {
+        if sslRootCert == "" {
+            return &ConfigError{
+                Operation: "validation",
+                Variable:  "INIT_POSTGRES_SSLROOTCERT",
+                Detail:    "SSL certificate required",
+                Expected:  "path to SSL root certificate",
+            }
+        }
+        if _, err := os.Stat(sslRootCert); err != nil {
+            return &ConfigError{
+                Operation: "validation",
+                Variable:  "INIT_POSTGRES_SSLROOTCERT",
+                Detail:    "SSL certificate file not found",
+                Expected:  "valid path to CA certificate file",
+                Err:      err,
+            }
+        }
+    }
 
-	return nil
+    return nil
 }
 
 func getRequiredEnv(key string) (string, error) {
@@ -231,92 +243,97 @@ func getEnvWithDefault(key, defaultValue string) string {
 // ======================
 
 func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
-	const maxAttempts = 30
-	const baseDelay = 1 * time.Second
+    const maxAttempts = 30
+    const baseDelay = 1 * time.Second
 
-	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
-		cfg.SuperUser,
-		cfg.SuperPass,
-		cfg.Host,
-		cfg.Port,
-		cfg.SuperUser,
-		cfg.SSLMode)
+    // Properly escape special characters in credentials
+    escapedUser := url.QueryEscape(cfg.SuperUser)
+    escapedPass := url.QueryEscape(cfg.SuperPass)
+    escapedDB := url.QueryEscape(cfg.SuperUser)
 
-	if cfg.SSLRootCert != "" {
-		connStr += fmt.Sprintf("&sslrootcert=%s", cfg.SSLRootCert)
-	}
+    connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+        escapedUser,
+        escapedPass,
+        cfg.Host,
+        cfg.Port,
+        escapedDB,
+        cfg.SSLMode)
 
-	parsedConfig, err := pgxpool.ParseConfig(connStr)
-	if err != nil {
-		return nil, &DatabaseError{
-			Operation: "configuration",
-			Detail:   "invalid connection parameters",
-			Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-			Advice:   "Check host, port, and SSL configuration",
-			Err:      err,
-		}
-	}
+    if cfg.SSLRootCert != "" {
+        connStr += fmt.Sprintf("&sslrootcert=%s", url.QueryEscape(cfg.SSLRootCert))
+    }
 
-	parsedConfig.MaxConns = 3
-	parsedConfig.MinConns = 1
-	parsedConfig.MaxConnLifetime = 5 * time.Minute
+    parsedConfig, err := pgxpool.ParseConfig(connStr)
+    if err != nil {
+        return nil, &DatabaseError{
+            Operation: "configuration",
+            Detail:   "invalid connection parameters",
+            Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+            Advice:   "Check special characters in credentials and SSL configuration",
+            Err:      err,
+        }
+    }
 
-	pool, err := pgxpool.NewWithConfig(ctx, parsedConfig)
-	if err != nil {
-		return nil, &DatabaseError{
-			Operation: "connection",
-			Detail:   "failed to create connection pool",
-			Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-			Advice:   "Verify network connectivity and database availability",
-			Err:      err,
-		}
-	}
+    parsedConfig.MaxConns = 3
+    parsedConfig.MinConns = 1
+    parsedConfig.MaxConnLifetime = 5 * time.Minute
 
-	defer func() {
-		if err != nil {
-			pool.Close()
-		}
-	}()
+    pool, err := pgxpool.NewWithConfig(ctx, parsedConfig)
+    if err != nil {
+        return nil, &DatabaseError{
+            Operation: "connection",
+            Detail:   "failed to create connection pool",
+            Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+            Advice:   "Verify network connectivity and credentials",
+            Err:      err,
+        }
+    }
 
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		err = pool.Ping(ctx)
-		if err == nil {
-			colorPrint(fmt.Sprintf("✅ Successfully connected to %s:%d", cfg.Host, cfg.Port), "green")
-			return pool, nil
-		}
+    defer func() {
+        if err != nil {
+            pool.Close()
+        }
+    }()
 
-		if isAuthError(err) {
-			return nil, &DatabaseError{
-				Operation: "authentication",
-				Detail:   "invalid credentials",
-				Target:   fmt.Sprintf("%s@%s:%d", cfg.SuperUser, cfg.Host, cfg.Port),
-				Code:     extractSQLState(err),
-				Advice:   "Verify INIT_POSTGRES_SUPER_USER and INIT_POSTGRES_SUPER_PASS",
-				Err:      err,
-			}
-		}
+    for attempt := 1; attempt <= maxAttempts; attempt++ {
+        err = pool.Ping(ctx)
+        if err == nil {
+            colorPrint(fmt.Sprintf("✅ Successfully connected to %s:%d", cfg.Host, cfg.Port), "green")
+            return pool, nil
+        }
 
-		if attempt < maxAttempts {
-			colorPrint(
-				fmt.Sprintf("⏳ Connection validation attempt %d/%d failed: %v. Retrying...", 
-					attempt, maxAttempts, err),
-				"yellow",
-			)
-			select {
-			case <-time.After(baseDelay * time.Duration(attempt)):
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-		}
-	}
+        if isAuthError(err) {
+            return nil, &DatabaseError{
+                Operation: "authentication",
+                Detail:   "invalid credentials",
+                Target:   fmt.Sprintf("%s@%s:%d", cfg.SuperUser, cfg.Host, cfg.Port),
+                Code:     extractSQLState(err),
+                Advice:   "Verify INIT_POSTGRES_SUPER_USER and INIT_POSTGRES_SUPER_PASS",
+                Err:      err,
+            }
+        }
 
-	return nil, &DatabaseError{
-		Operation: "connection",
-		Detail:   fmt.Sprintf("failed after %d validation attempts", maxAttempts),
-		Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Advice:   "Check database availability and network stability",
-		Err:      err,
-	}
+        if attempt < maxAttempts {
+            colorPrint(
+                fmt.Sprintf("⏳ Connection validation attempt %d/%d failed: %v. Retrying...", 
+                    attempt, maxAttempts, err),
+                "yellow",
+            )
+            select {
+            case <-time.After(baseDelay * time.Duration(attempt)):
+            case <-ctx.Done():
+                return nil, ctx.Err()
+            }
+        }
+    }
+
+    return nil, &DatabaseError{
+        Operation: "connection",
+        Detail:   fmt.Sprintf("failed after %d validation attempts", maxAttempts),
+        Target:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+        Advice:   "Check database availability and network stability",
+        Err:      err,
+    }
 }
 
 func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
