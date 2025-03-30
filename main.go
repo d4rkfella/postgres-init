@@ -479,7 +479,7 @@ func run() error {
     ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
     defer cancel()
 
-    pool, err := connectAndWait(ctx, cfg)
+    pool, err := connectPostgres(ctx, cfg) // Fixed function name
     if err != nil {
         return err
     }
