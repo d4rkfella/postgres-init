@@ -92,22 +92,25 @@ type Config struct {
 
 func (c Config) String() string {
 	sslColor := "\033[31m"
+	sslStatus := "⚠️ INSECURE"
 	if c.SSLMode == "verify-ca" || c.SSLMode == "verify-full" {
 		sslColor = "\033[32m"
+		sslStatus = "🔒 SECURE"
 	}
 
-	return fmt.Sprintf(
-		"Config{Host:%q, Port:%d, SuperUser:%q, SuperPass:%s, User:%q, UserPass:%s, DBName:%q, UserFlags:%q, SSLMode:%s%q\033[0m, SSLRootCert:%q}",
+	return fmt.Sprintf(`
+📋 \033[1;36mDatabase Configuration\033[0m
+┌───────────────────────────────────────────
+│ Host:       %-45q
+│ Port:       %-45d
+│ SSL Mode:   %s%-12s\033[0m %s
+│ Root Cert:  %-45q
+└───────────────────────────────────────────`,
 		c.Host,
 		c.Port,
-		c.SuperUser,
-		redactString(c.SuperPass),
-		c.User,
-		redactString(c.UserPass),
-		c.DBName,
-		c.UserFlags,
 		sslColor,
 		c.SSLMode,
+		sslStatus,
 		c.SSLRootCert,
 	)
 }
@@ -201,6 +204,35 @@ func verifySSLConnection(state tls.ConnectionState, expectedHost, sslMode string
     return nil
 }
 
+func printSecuritySummary(pool *pgxpool.Pool, sslMode string) {
+    conn, err := pool.Acquire(context.Background())
+    if err != nil {
+        fmt.Printf("\033[31m⚠️ Failed to check SSL status: %v\033[0m\n", err)
+        return
+    }
+    defer conn.Release()
+
+    var sslUsed bool
+    var cipher, version string
+    
+    err = conn.QueryRow(context.Background(), "SELECT ssl_is_used(), ssl_cipher(), ssl_version()").Scan(&sslUsed, &cipher, &version)
+    if err != nil {
+        fmt.Printf("\033[31m⚠️ SSL status check failed: %v\033[0m\n", err)
+        return
+    }
+
+    if sslUsed {
+        fmt.Printf("\033[32m🔒 SSL/TLS Active (%s)\033[0m\n", sslMode)
+        fmt.Printf("├─ \033[36mCipher:   \033[0m%s\n", cipher)
+        fmt.Printf("╰─ \033[36mProtocol: \033[0m%s\n", version)
+    } else {
+        fmt.Printf("\033[31m⚠️ SSL/TLS Inactive (config: %s)\033[0m\n", sslMode)
+        if sslMode != "disable" {
+            fmt.Printf("\033[1;31m╰─ CRITICAL: Configuration requires SSL but connection is unencrypted!\033[0m\n")
+        }
+    }
+}
+
 func printTLSDetails(conn *pgx.Conn, sslMode string) {
     if sslMode == "disable" {
         return
@@ -209,55 +241,46 @@ func printTLSDetails(conn *pgx.Conn, sslMode string) {
     rawConn := conn.PgConn().Conn()
     tlsConn, ok := rawConn.(*tls.Conn)
     if !ok {
-        log.Println("\033[33m⚠️ Connection is not using TLS\033[0m")
+        fmt.Printf("\033[33m⚠️ Connection is not using TLS\033[0m\n")
         return
     }
 
     state := tlsConn.ConnectionState()
-    log.Printf("\033[36mTLS Details: %s %s (SNI: %s)\033[0m",
-        tlsVersionToString(state.Version),
-        tls.CipherSuiteName(state.CipherSuite),
-        state.ServerName)
-}
-
-func printSecuritySummary(pool *pgxpool.Pool, sslMode string) {
-    if sslMode == "disable" {
-        return
-    }
-
-    conn, err := pool.Acquire(context.Background())
-    if err != nil {
-        return
-    }
-    defer conn.Release()
-
-    var sslUsed bool
-    var cipher, version string
-    conn.QueryRow(context.Background(), "SELECT ssl_is_used()").Scan(&sslUsed)
+    fmt.Printf("\033[36m🔍 TLS Connection Details:\033[0m\n")
+    fmt.Printf("├─ \033[36mVersion:      \033[0m%s\n", tlsVersionToString(state.Version))
+    fmt.Printf("├─ \033[36mCipher Suite: \033[0m%s\n", tls.CipherSuiteName(state.CipherSuite))
+    fmt.Printf("├─ \033[36mServer Name:  \033[0m%s\n", state.ServerName)
     
-    if sslUsed {
-        conn.QueryRow(context.Background(), 
-            "SELECT ssl_cipher(), ssl_version()").Scan(&cipher, &version)
-        log.Printf("\033[32mSSL Active: %s (%s)\033[0m", cipher, version)
-    } else {
-        log.Printf("\033[31mSSL Inactive (config: %s)\033[0m", sslMode)
+    if len(state.PeerCertificates) > 0 {
+        cert := state.PeerCertificates[0]
+        fmt.Printf("├─ \033[36mIssued By:    \033[0m%s\n", cert.Issuer)
+        fmt.Printf("╰─ \033[36mValid Until:  \033[0m%s\n", cert.NotAfter.Format("2006-01-02"))
     }
 }
 
 func sslStatusString(sslMode string, pool *pgxpool.Pool) string {
     conn, err := pool.Acquire(context.Background())
     if err != nil {
-        return "status_unknown"
+        return "\033[31mstatus_error\033[0m"
     }
     defer conn.Release()
     
     var sslUsed bool
-    conn.QueryRow(context.Background(), "SELECT ssl_is_used()").Scan(&sslUsed)
+    var version string
+    err = conn.QueryRow(context.Background(), "SELECT ssl_is_used(), ssl_version()").Scan(&sslUsed, &version)
+    if err != nil {
+        return "\033[31mstatus_error\033[0m"
+    }
     
     if !sslUsed {
-        return "disabled"
+        return "\033[31mdisabled\033[0m"
     }
-    return fmt.Sprintf("enabled (%s)", sslMode)
+    
+    color := "\033[32m"
+    if sslMode == "disable" {
+        color = "\033[31m"
+    }
+    return fmt.Sprintf("%senabled (%s/%s)\033[0m", color, sslMode, version)
 }
 
 func tlsVersionToString(version uint16) string {
@@ -440,12 +463,10 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
         if tlsConfig != nil && cfg.SSLVerbose {
 	    tlsConfig.VerifyConnection = func(state tls.ConnectionState) error {
 	        if err := verifySSLConnection(state, cfg.Host, cfg.SSLMode); err != nil {
-	            log.Printf("\033[31m⛔ SSL VALIDATION FAILURE: %v\033[0m", err)
+	            fmt.Printf("\033[31m⛔ SSL VALIDATION FAILURE: %v\033[0m\n", err)
 	            return err
 	        }
-	        if cfg.SSLMode == "verify-full" || cfg.SSLMode == "verify-ca" {
-	            log.Printf("\033[32m🔐 SSL VALIDATION SUCCESS: Mode=%s\033[0m", cfg.SSLMode)
-	        }
+	        fmt.Printf("\033[32m🔐 SSL VALIDATION SUCCESS: Mode=%s\033[0m\n", cfg.SSLMode)
 	        return nil
 	    }
 	}
