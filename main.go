@@ -133,20 +133,20 @@ func loadConfig() (Config, error) {
     cfg.DBName = os.Getenv("INIT_POSTGRES_DBNAME")
     cfg.Host = os.Getenv("INIT_POSTGRES_HOST")
 
-    cfg.Port = getEnvWithDefault("INIT_POSTGRES_PORT", "5432") 
-
     cfg.UserFlags = os.Getenv("INIT_POSTGRES_USER_FLAGS")
     cfg.SSLMode = getEnvWithDefault("INIT_POSTGRES_SSLMODE", "disable")
     cfg.SSLRootCert = os.Getenv("INIT_POSTGRES_SSLROOTCERT")
 
-    if err := validateConfig(&cfg); err != nil {
+    portStr := getEnvWithDefault("INIT_POSTGRES_PORT", "5432")
+
+    if err := validateConfig(&cfg, portStr); err != nil {
         return Config{}, err
     }
 
     return cfg, nil
 }
 
-func validateConfig(cfg *Config) error {
+func validateConfig(cfg *Config, portStr string) error {
     var err error
 
     required := []struct{
@@ -167,7 +167,6 @@ func validateConfig(cfg *Config) error {
         }
     }
 
-    portStr := getEnvWithDefault("INIT_POSTGRES_PORT", "5432")
     cfg.Port, err = strconv.Atoi(portStr)
     if err != nil {
         return configError("invalid port number", portStr, err)
