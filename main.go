@@ -187,15 +187,13 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	err := pool.QueryRow(ctx, "SELECT 1 FROM pg_roles WHERE rolname = $1", cfg.User).Scan(&exists)
 
 	if err != nil && !strings.Contains(err.Error(), "no rows in result set") {
-		return fmt.Errorf("⚠️ Failed to check user existence: %w", err)
+		return fmt.Errorf("failed to check user existence: %w", err)
 	}
 
-	// If the user doesn't exist, create the user
 	if exists != 1 {
 		colorPrint(fmt.Sprintf("👤 Creating user %s...", cfg.User), "green")
 		sql := fmt.Sprintf(`CREATE ROLE "%s" LOGIN ENCRYPTED PASSWORD '%s'`, cfg.User, cfg.UserPass)
 		
-		// Add user flags if any
 		if cfg.UserFlags != "" {
 			flags := strings.Fields(cfg.UserFlags)
 			for _, flag := range flags {
@@ -223,14 +221,14 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 		}
 
 		if _, err = pool.Exec(ctx, sql); err != nil {
-			return fmt.Errorf("❌ Failed to create user: %w", err)
+			return fmt.Errorf("failed to create user: %w", err)
 		}
 	} else {
 		colorPrint(fmt.Sprintf("👤 Updating password for existing user %s...", cfg.User), "green")
 		sql := fmt.Sprintf(`ALTER ROLE "%s" WITH ENCRYPTED PASSWORD '%s'`, cfg.User, cfg.UserPass)
 
 		if _, err = pool.Exec(ctx, sql); err != nil {
-			return fmt.Errorf("❌ Failed to update user password: %w", err)
+			return fmt.Errorf("failed to update user password: %w", err)
 		}
 	}
 
@@ -242,21 +240,21 @@ func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	err := pool.QueryRow(ctx, "SELECT 1 FROM pg_database WHERE datname = $1", cfg.DBName).Scan(&exists)
 
 	if err != nil && !strings.Contains(err.Error(), "no rows in result set") {
-		return fmt.Errorf("⚠️ Failed to check database existence: %w", err)
+		return fmt.Errorf("failed to check database existence: %w", err)
 	}
 
 	if exists != 1 {
 		colorPrint(fmt.Sprintf("📦 Creating database %s...", cfg.DBName), "green")
 		sql := fmt.Sprintf(`CREATE DATABASE "%s" OWNER "%s"`, cfg.DBName, cfg.User)
 		if _, err = pool.Exec(ctx, sql); err != nil {
-			return fmt.Errorf("Failed to create database: %w", err)
+			return fmt.Errorf("failed to create database: %w", err)
 		}
 	}
 
 	colorPrint(fmt.Sprintf("🔑 Granting all privileges to user \"%s\" on database \"%s\"...", cfg.User, cfg.DBName), "green")
 	sql := fmt.Sprintf(`GRANT ALL PRIVILEGES ON DATABASE "%s" TO "%s"`, cfg.DBName, cfg.User)
 	if _, err = pool.Exec(ctx, sql); err != nil {
-	    return fmt.Errorf("❌ Failed to grant privileges: %w", err)
+	    return fmt.Errorf("failed to grant privileges: %w", err)
 	}
 	
 	return nil
