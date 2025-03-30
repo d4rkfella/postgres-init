@@ -299,11 +299,12 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 		}
 	}
 
-	tlsConfig, err := createTLSConfig(cfg.SSLMode, cfg.SSLRootCert)
+	tlsConfig, err := createTLSConfig(cfg.SSLMode, cfg.SSLRootCert, cfg.Host)
 	if err != nil {
 		return nil, err
 	}
-
+    
+	parsedConfig.ConnConfig.TLSConfig = tlsConfig
 	parsedConfig.MaxConns = 3
 	parsedConfig.MinConns = 1
 	parsedConfig.MaxConnLifetime = 5 * time.Minute
@@ -365,45 +366,45 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 	}
 }
 
-func createTLSConfig(sslMode, sslRootCert string) (*tls.Config, error) {
-	if sslMode == "disable" {
-		return nil, nil
-	}
+func createTLSConfig(sslMode, sslRootCert, host string) (*tls.Config, error) {
+    if sslMode == "disable" {
+        return nil, nil
+    }
 
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: sslMode == "require",
-	}
+    tlsConfig := &tls.Config{
+        InsecureSkipVerify: sslMode == "require",
+    }
 
-	if sslMode == "verify-ca" || sslMode == "verify-full" {
-		if sslRootCert != "" {
-			certBytes, err := os.ReadFile(sslRootCert)
-			if err != nil {
-				return nil, &ConfigError{
-					Operation: "ssl-config",
-					Variable:  "INIT_POSTGRES_SSLROOTCERT",
-					Detail:    "failed to read SSL certificate",
-					Expected:  "valid certificate file",
-					Err:       err,
-				}
-			}
+    if sslMode == "verify-ca" || sslMode == "verify-full" {
+        if sslRootCert != "" {
+            certBytes, err := os.ReadFile(sslRootCert)
+            if err != nil {
+                return nil, &ConfigError{
+                    Operation: "ssl-config",
+                    Variable:  "INIT_POSTGRES_SSLROOTCERT",
+                    Detail:    "failed to read SSL certificate",
+                    Expected:  "valid certificate file",
+                    Err:       err,
+                }
+            }
 
-			tlsConfig.RootCAs = x509.NewCertPool()
-			if !tlsConfig.RootCAs.AppendCertsFromPEM(certBytes) {
-				return nil, &ConfigError{
-					Operation: "ssl-config",
-					Variable:  "INIT_POSTGRES_SSLROOTCERT",
-					Detail:    "failed to parse SSL certificate",
-					Expected:  "valid PEM-encoded certificate",
-				}
-			}
-		}
+            tlsConfig.RootCAs = x509.NewCertPool()
+            if !tlsConfig.RootCAs.AppendCertsFromPEM(certBytes) {
+                return nil, &ConfigError{
+                    Operation: "ssl-config",
+                    Variable:  "INIT_POSTGRES_SSLROOTCERT",
+                    Detail:    "failed to parse SSL certificate",
+                    Expected:  "valid PEM-encoded certificate",
+                }
+            }
+        }
 
-		if sslMode == "verify-full" {
-			tlsConfig.ServerName = cfg.Host
-		}
-	}
+        if sslMode == "verify-full" {
+            tlsConfig.ServerName = host
+        }
+    }
 
-	return tlsConfig, nil
+    return tlsConfig, nil
 }
 
 func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
