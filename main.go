@@ -286,13 +286,6 @@ func validatePassword(pass string) error {
 	return nil
 }
 
-func getRequiredEnv(key string) (string, error) {
-	if value := os.Getenv(key); value != "" {
-		return value, nil
-	}
-	return "", fmt.Errorf("not set")
-}
-
 func getEnvWithDefault(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -423,7 +416,8 @@ func loadConfig() (Config, error) {
 	}
 
 	for key, ptr := range required {
-		if *ptr, err = getRequiredEnv(key); err != nil {
+		*ptr = os.Getenv(key)
+		if *ptr == "" {
 			return Config{}, &ConfigError{
 				Operation: "loading",
 				Variable:  key,
@@ -465,20 +459,6 @@ func loadConfig() (Config, error) {
 	cfg.UserFlags = os.Getenv("INIT_POSTGRES_USER_FLAGS")
 	cfg.SSLMode = getEnvWithDefault("INIT_POSTGRES_SSLMODE", "disable")
 	cfg.SSLRootCert = os.Getenv("INIT_POSTGRES_SSLROOTCERT")
-
-	allowedModes := map[string]bool{
-		"disable": true, "allow": true, "prefer": true,
-		"require": true, "verify-ca": true, "verify-full": true,
-	}
-
-	if !allowedModes[cfg.SSLMode] {
-		return Config{}, &ConfigError{
-			Operation: "validation",
-			Variable:  "INIT_POSTGRES_SSLMODE",
-			Detail:    "invalid SSL mode",
-			Expected:  "one of: disable, allow, prefer, require, verify-ca, verify-full",
-		}
-	}
 
 	if cfg.SSLMode == "verify-ca" || cfg.SSLMode == "verify-full" {
 		if cfg.SSLRootCert == "" {
@@ -544,7 +524,12 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 
 	parsedConfig, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
-		return nil, classifyPostgresError(err, cfg, "connection")
+		return nil, &ConfigError{
+			Operation: "parsing connection string",
+			Detail:    "invalid connection string format",
+			Expected:  "valid PostgreSQL connection string",
+			Err:       err,
+		}
 	}
 
 	parsedConfig.MaxConns = 3
