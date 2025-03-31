@@ -733,7 +733,7 @@ func run() error {
 		return err
 	}
 
-	fmt.Printf("\n\033[1;35m📋 Loaded Configuration\033[0m\n%s", cfg.String())
+	fmt.Printf("\n\033[1;35m📋 Loaded Configuration\033[0m\n%s\n", cfg.String())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
