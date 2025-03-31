@@ -560,7 +560,7 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 	const maxAttempts = 30
 	const baseDelay = 1 * time.Second
 
-	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s",
 		url.QueryEscape(cfg.SuperUser),
 		url.QueryEscape(cfg.SuperPass),
 		cfg.Host,
