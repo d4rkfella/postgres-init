@@ -105,13 +105,13 @@ func (c Config) String() string {
 	}
 
 	return fmt.Sprintf(
-		"\n\033[1;36m┌─────────────────────────────────────────\n" +
-			"│ \033[1;34m%-14s\033[0m %-30s\n" +
-			"│ \033[1;34m%-14s\033[0m %-30d\n" +
-			"│ \033[1;34m%-14s\033[0m %-30q\n" +
-			"│ \033[1;34m%-14s\033[0m %-30q\n" +
-			"│ \033[1;34m%-14s\033[0m %s%-17s\033[0m %s\n" +
-			"│ \033[1;34m%-14s\033[0m %-30q\n" +
+		"\n\033[1;36m┌─────────────────────────────────────────\n"+
+			"│ \033[1;34m%-14s\033[0m %-30s\n"+
+			"│ \033[1;34m%-14s\033[0m %-30d\n"+
+			"│ \033[1;34m%-14s\033[0m %-30q\n"+
+			"│ \033[1;34m%-14s\033[0m %-30q\n"+
+			"│ \033[1;34m%-14s\033[0m %s%-17s\033[0m %s\n"+
+			"│ \033[1;34m%-14s\033[0m %-30q\n"+
 			"\033[1;36m└─────────────────────────────────────────\033[0m",
 		"Host:", c.Host,
 		"Port:", c.Port,
@@ -614,61 +614,61 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 }
 
 func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
-    tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
-    if err != nil {
-        return classifyPostgresError(err, cfg, "user_management")
-    }
-    defer tx.Rollback(ctx)
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return classifyPostgresError(err, cfg, "user_management")
+	}
+	defer tx.Rollback(ctx)
 
-    var exists bool
-    err = tx.QueryRow(ctx,
-        "SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1)",
-        cfg.User,
-    ).Scan(&exists)
+	var exists bool
+	err = tx.QueryRow(ctx,
+		"SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1)",
+		cfg.User,
+	).Scan(&exists)
 
-    if err != nil {
-        return classifyPostgresError(err, cfg, "user_management")
-    }
+	if err != nil {
+		return classifyPostgresError(err, cfg, "user_management")
+	}
 
-    flags, err := parseUserFlags(cfg.UserFlags)
-    if err != nil {
-        return &DatabaseError{
-            Operation: "user_configuration",
-            Detail:    fmt.Sprintf("invalid flags: %v", err),
-            Target:    cfg.UserFlags,
-            Advice:    "Use valid --createdb, --createrole flags",
-            Err:       err,
-        }
-    }
+	flags, err := parseUserFlags(cfg.UserFlags)
+	if err != nil {
+		return &DatabaseError{
+			Operation: "user_configuration",
+			Detail:    fmt.Sprintf("invalid flags: %v", err),
+			Target:    cfg.UserFlags,
+			Advice:    "Use valid --createdb, --createrole flags",
+			Err:       err,
+		}
+	}
 
-    var sql string
-    var op string
-    
-    if exists {
-        fmt.Printf("\033[32m👤 Updating role %s...\033[0m\n", cfg.User)
-        op = "user_update"
-        sql = fmt.Sprintf("ALTER ROLE %s WITH ENCRYPTED PASSWORD %s %s",
-            pgx.Identifier{cfg.User}.Sanitize(),
-            quoteLiteral(cfg.UserPass),
-            flags)
-    } else {
-        fmt.Printf("\033[32m👤 Creating user %s...\033[0m\n", cfg.User)
-        op = "user_creation"
-        sql = fmt.Sprintf("CREATE ROLE %s LOGIN ENCRYPTED PASSWORD %s %s",
-            pgx.Identifier{cfg.User}.Sanitize(),
-            quoteLiteral(cfg.UserPass),
-            flags)
-    }
+	var sql string
+	var op string
 
-    if _, err = tx.Exec(ctx, sql); err != nil {
-        return classifyPostgresError(err, cfg, op)
-    }
+	if exists {
+		fmt.Printf("\033[32m👤 Updating role %s...\033[0m\n", cfg.User)
+		op = "user_update"
+		sql = fmt.Sprintf("ALTER ROLE %s WITH ENCRYPTED PASSWORD %s %s",
+			pgx.Identifier{cfg.User}.Sanitize(),
+			quoteLiteral(cfg.UserPass),
+			flags)
+	} else {
+		fmt.Printf("\033[32m👤 Creating user %s...\033[0m\n", cfg.User)
+		op = "user_creation"
+		sql = fmt.Sprintf("CREATE ROLE %s LOGIN ENCRYPTED PASSWORD %s %s",
+			pgx.Identifier{cfg.User}.Sanitize(),
+			quoteLiteral(cfg.UserPass),
+			flags)
+	}
 
-    if err = tx.Commit(ctx); err != nil {
-        return classifyPostgresError(err, cfg, "transaction")
-    }
+	if _, err = tx.Exec(ctx, sql); err != nil {
+		return classifyPostgresError(err, cfg, op)
+	}
 
-    return nil
+	if err = tx.Commit(ctx); err != nil {
+		return classifyPostgresError(err, cfg, "transaction")
+	}
+
+	return nil
 }
 
 func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
