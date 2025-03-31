@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -77,7 +76,7 @@ func (e *ConfigError) Error() string {
 
 type Config struct {
 	Host        string
-	Port        int
+	Port        string
 	SuperUser   string
 	SuperPass   string
 	User        string
@@ -106,7 +105,7 @@ func (c Config) String() string {
 	return fmt.Sprintf(
 		"\n\033[1;36m┌─────────────────────────────────────────\n"+
 			"│ \033[1;34m%-14s\033[0m %-30s\n"+
-			"│ \033[1;34m%-14s\033[0m %-30d\n"+
+			"│ \033[1;34m%-14s\033[0m %-30s\n"+
 			"│ \033[1;34m%-14s\033[0m %-30q\n"+
 			"│ \033[1;34m%-14s\033[0m %-30q\n"+
 			"│ \033[1;34m%-14s\033[0m %s%-17s\033[0m %s\n"+
@@ -122,7 +121,7 @@ func (c Config) String() string {
 }
 
 func handleSuccessfulConnection(pool *pgxpool.Pool, cfg Config) (*pgxpool.Pool, error) {
-	fmt.Printf("\033[32m✅ Successfully connected to %s:%d\033[0m\n", cfg.Host, cfg.Port)
+	fmt.Printf("\033[32m✅ Successfully connected to %s:%s\033[0m\n", cfg.Host, cfg.Port)
 
 	if cfg.SSLMode != "disable" {
 		conn, err := pool.Acquire(context.Background())
@@ -352,7 +351,6 @@ func versionSecurityStatus(version uint16) string {
 func parseUserFlags(flags string) (string, error) {
 	validFlags := make([]string, 0)
 	allowedFlags := map[string]bool{
-		// Boolean privileges
 		"--login":          true, // LOGIN
 		"--no-login":       true, // NOLOGIN
 		"--createdb":       true, // CREATEDB
@@ -368,7 +366,6 @@ func parseUserFlags(flags string) (string, error) {
 		"--bypassrls":      true, // BYPASSRLS (PostgreSQL 9.5+)
 		"--no-bypassrls":   true, // NOBYPASSRLS
 
-		// Connection limits
 		"--connection-limit": true, // Needs separate value handling
 	}
 
@@ -380,7 +377,6 @@ func parseUserFlags(flags string) (string, error) {
 			return "", fmt.Errorf("unsupported user flag: %s", baseFlag)
 		}
 
-		// Handle connection limit separately
 		if baseFlag == "--connection-limit" {
 			if len(parts) != 2 {
 				return "", fmt.Errorf("connection limit requires a value")
@@ -404,7 +400,6 @@ func parseUserFlags(flags string) (string, error) {
 
 func loadConfig() (Config, error) {
 	var cfg Config
-	var err error
 
 	required := map[string]*string{
 		"INIT_POSTGRES_SUPER_USER": &cfg.SuperUser,
@@ -445,19 +440,10 @@ func loadConfig() (Config, error) {
 		}
 	}
 
-	portStr := getEnvWithDefault("INIT_POSTGRES_PORT", "5432")
-	cfg.Port, err = strconv.Atoi(portStr)
-	if err != nil || cfg.Port < 1 || cfg.Port > 65535 {
-		return Config{}, &ConfigError{
-			Operation: "validation",
-			Variable:  "INIT_POSTGRES_PORT",
-			Detail:    "invalid port number",
-			Expected:  "integer between 1-65535",
-		}
-	}
+	cfg.Port = getEnvWithDefault("INIT_POSTGRES_PORT", "5432")
+	cfg.SSLMode = getEnvWithDefault("INIT_POSTGRES_SSLMODE", "disable")
 
 	cfg.UserFlags = os.Getenv("INIT_POSTGRES_USER_FLAGS")
-	cfg.SSLMode = getEnvWithDefault("INIT_POSTGRES_SSLMODE", "disable")
 	cfg.SSLRootCert = os.Getenv("INIT_POSTGRES_SSLROOTCERT")
 
 	if cfg.SSLMode == "verify-ca" || cfg.SSLMode == "verify-full" {
@@ -513,7 +499,7 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 	const maxAttempts = 30
 	const baseDelay = 1 * time.Second
 
-	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s&sslrootcert=%s",
+	connStr := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s&sslrootcert=%s",
 		url.QueryEscape(cfg.SuperUser),
 		url.QueryEscape(cfg.SuperPass),
 		cfg.Host,
@@ -525,8 +511,8 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 	parsedConfig, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
 		return nil, &ConfigError{
-			Operation: "parsing connection string",
-			Detail:    "invalid connection string format",
+			Operation: "connection string",
+			Detail:    "invalid connection string (check detailed error message below)",
 			Expected:  "valid PostgreSQL connection string",
 			Err:       err,
 		}
@@ -600,9 +586,9 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	if err != nil {
 		return &DatabaseError{
 			Operation: "user_configuration",
-			Detail:    fmt.Sprintf("invalid flags: %v", err),
+			Detail:    "unsupported user flag(s) specified",
 			Target:    cfg.UserFlags,
-			Advice:    "Use valid --createdb, --createrole flags",
+			Advice:    "Use valid --createdb, --createrole, etc.. flags",
 			Err:       err,
 		}
 	}
