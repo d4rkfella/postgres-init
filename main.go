@@ -182,98 +182,98 @@ func sanitizeError(err error, password string) string {
 }
 
 func classifyPostgresError(err error, cfg Config, operation string) *DatabaseError {
-    var pgErr *pgconn.PgError
-    if !errors.As(err, &pgErr) {
-        return nil
-    }
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return nil
+	}
 
-    newDBError := func(op, detail, advice string) *DatabaseError {
-        target := cfg.Host
-        if op == "authentication" {
-            target = fmt.Sprintf("%s@%s", cfg.SuperUser, target)
-        } else if strings.Contains(op, "user") {
-            target = cfg.User
-        } else if strings.Contains(op, "database") {
-            target = cfg.DBName
-        }
-        
-        return &DatabaseError{
-            Operation: op,
-            Detail:    detail,
-            Target:    target,
-            Code:      pgErr.Code,
-            Advice:    advice,
-            Err:       err,
-        }
-    }
+	newDBError := func(op, detail, advice string) *DatabaseError {
+		target := cfg.Host
+		if op == "authentication" {
+			target = fmt.Sprintf("%s@%s", cfg.SuperUser, target)
+		} else if strings.Contains(op, "user") {
+			target = cfg.User
+		} else if strings.Contains(op, "database") {
+			target = cfg.DBName
+		}
 
-    switch operation {
-    case "connection":
-        return classifyConnectionError(pgErr, newDBError)
-    case "user_management":
-        return classifyUserError(pgErr, newDBError)
-    case "database_management":
-        return classifyDatabaseError(pgErr, newDBError)
-    default:
-        return newDBError(operation, pgErr.Message, 
-            "Check PostgreSQL logs for detailed error information")
-    }
+		return &DatabaseError{
+			Operation: op,
+			Detail:    detail,
+			Target:    target,
+			Code:      pgErr.Code,
+			Advice:    advice,
+			Err:       err,
+		}
+	}
+
+	switch operation {
+	case "connection":
+		return classifyConnectionError(pgErr, newDBError)
+	case "user_management":
+		return classifyUserError(pgErr, newDBError)
+	case "database_management":
+		return classifyDatabaseError(pgErr, newDBError)
+	default:
+		return newDBError(operation, pgErr.Message,
+			"Check PostgreSQL logs for detailed error information")
+	}
 }
 
 func classifyConnectionError(pgErr *pgconn.PgError, newDBError func(op, detail, advice string) *DatabaseError) *DatabaseError {
-    switch pgErr.Code {
-    case "28P01":
-        return newDBError("authentication", "invalid password", "Verify password matches the database user")
-    case "28000":
-        if strings.Contains(pgErr.Message, "pg_hba.conf") {
-            if strings.Contains(pgErr.Message, "no encryption") {
-                return newDBError("ssl_configuration", "server requires SSL connection", 
-                    "Set SSLMode to 'require', 'verify-ca', or 'verify-full'")
-            }
-            return newDBError("authorization", "connection rejected by pg_hba.conf", 
-                "Check PostgreSQL's pg_hba.conf file")
-        }
-        return newDBError("authentication", "invalid authorization", "Verify user exists and has proper privileges")
-    case "08000", "08001", "08003", "08004", "08006", "08007":
-        return newDBError("connection", "connection failed", 
-            "Check network connectivity and database availability")
-    case "57P03":
-        return newDBError("connection", "database is starting up", "Wait for database to become ready")
-    default:
-        return nil
-    }
+	switch pgErr.Code {
+	case "28P01":
+		return newDBError("authentication", "invalid password", "Verify password matches the database user")
+	case "28000":
+		if strings.Contains(pgErr.Message, "pg_hba.conf") {
+			if strings.Contains(pgErr.Message, "no encryption") {
+				return newDBError("ssl_configuration", "server requires SSL connection",
+					"Set SSLMode to 'require', 'verify-ca', or 'verify-full'")
+			}
+			return newDBError("authorization", "connection rejected by pg_hba.conf",
+				"Check PostgreSQL's pg_hba.conf file")
+		}
+		return newDBError("authentication", "invalid authorization", "Verify user exists and has proper privileges")
+	case "08000", "08001", "08003", "08004", "08006", "08007":
+		return newDBError("connection", "connection failed",
+			"Check network connectivity and database availability")
+	case "57P03":
+		return newDBError("connection", "database is starting up", "Wait for database to become ready")
+	default:
+		return nil
+	}
 }
 
 func classifyUserError(pgErr *pgconn.PgError, newDBError func(op, detail, advice string) *DatabaseError) *DatabaseError {
-    switch pgErr.Code {
-    case "42710":
-        return newDBError("user_creation", "database user already exists", 
-            "Use a different username or set 'IF NOT EXISTS'")
-    case "0LP01":
-        return newDBError("user_configuration", "invalid user configuration", 
-            "Check password complexity rules and connection limit settings")
-    case "42501":
-        return newDBError("privileges", "insufficient privileges for user operation", 
-            "Use a superuser account or request proper privileges")
-    default:
-        return nil
-    }
+	switch pgErr.Code {
+	case "42710":
+		return newDBError("user_creation", "database user already exists",
+			"Use a different username or set 'IF NOT EXISTS'")
+	case "0LP01":
+		return newDBError("user_configuration", "invalid user configuration",
+			"Check password complexity rules and connection limit settings")
+	case "42501":
+		return newDBError("privileges", "insufficient privileges for user operation",
+			"Use a superuser account or request proper privileges")
+	default:
+		return nil
+	}
 }
 
 func classifyDatabaseError(pgErr *pgconn.PgError, newDBError func(op, detail, advice string) *DatabaseError) *DatabaseError {
-    switch pgErr.Code {
-    case "42P04":
-        return newDBError("database_creation", "database already exists", 
-            "Use a different database name or set 'IF NOT EXISTS'")
-    case "42501":
-        return newDBError("privileges", "insufficient privileges to create database", 
-            "Use a superuser account or request CREATEDB privileges")
-    case "3D000":
-        return newDBError("database_access", "database does not exist", 
-            "Verify database name or create it first")
-    default:
-        return nil
-    }
+	switch pgErr.Code {
+	case "42P04":
+		return newDBError("database_creation", "database already exists",
+			"Use a different database name or set 'IF NOT EXISTS'")
+	case "42501":
+		return newDBError("privileges", "insufficient privileges to create database",
+			"Use a superuser account or request CREATEDB privileges")
+	case "3D000":
+		return newDBError("database_access", "database does not exist",
+			"Verify database name or create it first")
+	default:
+		return nil
+	}
 }
 
 func isFatalError(operation string) bool {
@@ -557,166 +557,170 @@ func createTLSConfig(sslMode, sslRootCert, host string) (*tls.Config, error) {
 // ======================
 
 func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
-    const maxAttempts = 30
-    const baseDelay = 1 * time.Second
+	const maxAttempts = 30
+	const baseDelay = 1 * time.Second
 
-    connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
-        url.QueryEscape(cfg.SuperUser),
-        url.QueryEscape(cfg.SuperPass),
-        cfg.Host,
-        cfg.Port,
-        url.QueryEscape(cfg.DBName),
-        url.QueryEscape(cfg.SSLMode))
+	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+		url.QueryEscape(cfg.SuperUser),
+		url.QueryEscape(cfg.SuperPass),
+		cfg.Host,
+		cfg.Port,
+		url.QueryEscape(cfg.DBName),
+		url.QueryEscape(cfg.SSLMode))
 
-    parsedConfig, err := pgxpool.ParseConfig(connStr)
-    if err != nil {
-        return nil, classifyPostgresError(err, cfg, "connection")
-    }
+	parsedConfig, err := pgxpool.ParseConfig(connStr)
+	if err != nil {
+		return nil, classifyPostgresError(err, cfg, "connection")
+	}
 
-    if cfg.SSLMode != "disable" {
-        parsedConfig.ConnConfig.TLSConfig = cfg.TLSConfig
-    }
+	if cfg.SSLMode != "disable" {
+		parsedConfig.ConnConfig.TLSConfig = cfg.TLSConfig
+	}
 
-    parsedConfig.MaxConns = 3
-    parsedConfig.MinConns = 1
-    parsedConfig.MaxConnLifetime = 5 * time.Minute
-    parsedConfig.ConnConfig.ConnectTimeout = 10 * time.Second
+	parsedConfig.MaxConns = 3
+	parsedConfig.MinConns = 1
+	parsedConfig.MaxConnLifetime = 5 * time.Minute
+	parsedConfig.ConnConfig.ConnectTimeout = 10 * time.Second
 
-    pool, err := pgxpool.NewWithConfig(ctx, parsedConfig)
-    if err != nil {
-        return nil, classifyPostgresError(err, cfg, "connection")
-    }
+	pool, err := pgxpool.NewWithConfig(ctx, parsedConfig)
+	if err != nil {
+		return nil, classifyPostgresError(err, cfg, "connection")
+	}
 
-    defer func() {
-        if err != nil {
-            pool.Close()
-            fmt.Printf("\033[33m⚠️ Closed connection pool due to initialization failure\033[0m\n")
-        }
-    }()
+	defer func() {
+		if err != nil {
+			pool.Close()
+			fmt.Printf("\033[33m⚠️ Closed connection pool due to initialization failure\033[0m\n")
+		}
+	}()
 
-    for attempt := 1; attempt <= maxAttempts; attempt++ {
-        err = pool.Ping(ctx)
-        if err == nil {
-            return handleSuccessfulConnection(pool, cfg)
-        }
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		err = pool.Ping(ctx)
+		if err == nil {
+			return handleSuccessfulConnection(pool, cfg)
+		}
 
-        if dbErr := classifyPostgresError(err, cfg, "connection"); dbErr != nil {
-            if isFatalError(dbErr.Operation) {
-                return nil, dbErr
-            }
-        }
+		if dbErr := classifyPostgresError(err, cfg, "connection"); dbErr != nil {
+			if isFatalError(dbErr.Operation) {
+				return nil, dbErr
+			}
+		}
 
-        if attempt < maxAttempts {
-            fmt.Printf("\033[33m⏳ Connection attempt %d/%d failed: %v. Retrying...\033[0m\n",
-                attempt, maxAttempts, sanitizeError(err, cfg.SuperPass))
-            select {
-            case <-time.After(baseDelay * time.Duration(attempt)):
-            case <-ctx.Done():
-                return nil, classifyPostgresError(ctx.Err(), cfg, "connection")
-            }
-        }
-    }
+		if attempt < maxAttempts {
+			fmt.Printf("\033[33m⏳ Connection attempt %d/%d failed: %v. Retrying...\033[0m\n",
+				attempt, maxAttempts, sanitizeError(err, cfg.SuperPass))
+			select {
+			case <-time.After(baseDelay * time.Duration(attempt)):
+			case <-ctx.Done():
+				return nil, classifyPostgresError(ctx.Err(), cfg, "connection")
+			}
+		}
+	}
 
-    return nil, classifyPostgresError(
-        fmt.Errorf("failed after %d attempts", maxAttempts),
-        cfg,
-        "connection",
-    )
+	return nil, classifyPostgresError(
+		fmt.Errorf("failed after %d attempts", maxAttempts),
+		cfg,
+		"connection",
+	)
 }
 
 func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
-    tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
-    if err != nil {
-        return classifyPostgresError(err, cfg, "user_management")
-    }
-    defer tx.Rollback(ctx)
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return classifyPostgresError(err, cfg, "user_management")
+	}
+	defer tx.Rollback(ctx)
 
-    var exists bool
-    err = tx.QueryRow(ctx,
-        "SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1)",
-        cfg.User,
-    ).Scan(&exists)
+	var exists bool
+	err = tx.QueryRow(ctx,
+		"SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1)",
+		cfg.User,
+	).Scan(&exists)
 
-    if err != nil {
-        return classifyPostgresError(err, cfg, "user_management")
-    }
+	if err != nil {
+		return classifyPostgresError(err, cfg, "user_management")
+	}
 
-    flags, err := parseUserFlags(cfg.UserFlags)
-    if err != nil {
-        return &DatabaseError{
-            Operation: "user_configuration",
-            Detail:    fmt.Sprintf("invalid flags: %v", err),
-            Target:    cfg.UserFlags,
-            Advice:    "Use valid --createdb, --createrole flags",
-            Err:       err,
-        }
-    }
+	flags, err := parseUserFlags(cfg.UserFlags)
+	if err != nil {
+		return &DatabaseError{
+			Operation: "user_configuration",
+			Detail:    fmt.Sprintf("invalid flags: %v", err),
+			Target:    cfg.UserFlags,
+			Advice:    "Use valid --createdb, --createrole flags",
+			Err:       err,
+		}
+	}
 
-    op := "user_creation"
-    sql := fmt.Sprintf("CREATE ROLE %s LOGIN ENCRYPTED PASSWORD %s %s",
-        pgx.Identifier{cfg.User}.Sanitize(),
-        quoteLiteral(cfg.UserPass),
-        flags)
+	op := "user_creation"
+	fmt.Printf("\033[32m👤 Creating user %s...\033[0m\n", cfg.User)
+	sql := fmt.Sprintf("CREATE ROLE %s LOGIN ENCRYPTED PASSWORD %s %s",
+		pgx.Identifier{cfg.User}.Sanitize(),
+		quoteLiteral(cfg.UserPass),
+		flags)
 
-    if exists {
-        op = "user_update"
-        sql = fmt.Sprintf("ALTER ROLE %s WITH ENCRYPTED PASSWORD %s %s",
-            pgx.Identifier{cfg.User}.Sanitize(),
-            quoteLiteral(cfg.UserPass),
-            flags)
-    }
+	if exists {
+		op = "user_update"
+		fmt.Printf("\033[32m👤 Updating role %s...\033[0m\n", cfg.User)
+		sql = fmt.Sprintf("ALTER ROLE %s WITH ENCRYPTED PASSWORD %s %s",
+			pgx.Identifier{cfg.User}.Sanitize(),
+			quoteLiteral(cfg.UserPass),
+			flags)
+	}
 
-    if _, err = tx.Exec(ctx, sql); err != nil {
-        return classifyPostgresError(err, cfg, op)
-    }
+	if _, err = tx.Exec(ctx, sql); err != nil {
+		return classifyPostgresError(err, cfg, op)
+	}
 
-    if err = tx.Commit(ctx); err != nil {
-        return classifyPostgresError(err, cfg, "transaction")
-    }
+	if err = tx.Commit(ctx); err != nil {
+		return classifyPostgresError(err, cfg, "transaction")
+	}
 
-    return nil
+	return nil
 }
 
 func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
-    tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
-    if err != nil {
-        return classifyPostgresError(err, cfg, "database_management")
-    }
-    defer tx.Rollback(ctx)
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return classifyPostgresError(err, cfg, "database_management")
+	}
+	defer tx.Rollback(ctx)
 
-    var exists bool
-    err = tx.QueryRow(ctx,
-        "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)",
-        cfg.DBName,
-    ).Scan(&exists)
+	var exists bool
+	err = tx.QueryRow(ctx,
+		"SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)",
+		cfg.DBName,
+	).Scan(&exists)
 
-    if err != nil {
-        return classifyPostgresError(err, cfg, "database_management")
-    }
+	if err != nil {
+		return classifyPostgresError(err, cfg, "database_management")
+	}
 
-    if !exists {
-        sql := fmt.Sprintf("CREATE DATABASE %s OWNER %s",
-            pgx.Identifier{cfg.DBName}.Sanitize(),
-            pgx.Identifier{cfg.User}.Sanitize())
+	if !exists {
+		fmt.Printf("\033[32m📦 Creating database %s...\033[0m\n", cfg.DBName)
+		sql := fmt.Sprintf("CREATE DATABASE %s OWNER %s",
+			pgx.Identifier{cfg.DBName}.Sanitize(),
+			pgx.Identifier{cfg.User}.Sanitize())
 
-        if _, err = tx.Exec(ctx, sql); err != nil {
-            return classifyPostgresError(err, cfg, "database_creation")
-        }
-    }
+		if _, err = tx.Exec(ctx, sql); err != nil {
+			return classifyPostgresError(err, cfg, "database_creation")
+		}
+	}
 
-    sql := fmt.Sprintf("GRANT ALL PRIVILEGES ON DATABASE %s TO %s",
-        pgx.Identifier{cfg.DBName}.Sanitize(),
-        pgx.Identifier{cfg.User}.Sanitize())
+	fmt.Printf("\033[32m🔑 Granting privileges on %q to %q...\033[0m\n", cfg.DBName, cfg.User)
+	sql := fmt.Sprintf("GRANT ALL PRIVILEGES ON DATABASE %s TO %s",
+		pgx.Identifier{cfg.DBName}.Sanitize(),
+		pgx.Identifier{cfg.User}.Sanitize())
 
-    if _, err = tx.Exec(ctx, sql); err != nil {
-        return classifyPostgresError(err, cfg, "privileges_assignment")
-    }
+	if _, err = tx.Exec(ctx, sql); err != nil {
+		return classifyPostgresError(err, cfg, "privileges_assignment")
+	}
 
-    if err = tx.Commit(ctx); err != nil {
-        return classifyPostgresError(err, cfg, "transaction")
-    }
+	if err = tx.Commit(ctx); err != nil {
+		return classifyPostgresError(err, cfg, "transaction")
+	}
 
-    return nil
+	return nil
 }
 
 // ======================
