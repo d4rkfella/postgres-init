@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net/url"
@@ -465,6 +466,62 @@ func loadConfig() (Config, error) {
 	cfg.SSLMode = getEnvWithDefault("INIT_POSTGRES_SSLMODE", "disable")
 	cfg.SSLRootCert = os.Getenv("INIT_POSTGRES_SSLROOTCERT")
 
+	allowedModes := map[string]bool{
+		"disable": true, "allow": true, "prefer": true,
+		"require": true, "verify-ca": true, "verify-full": true,
+	}
+
+	if !allowedModes[cfg.SSLMode] {
+		return Config{}, &ConfigError{
+			Operation: "validation",
+			Variable:  "INIT_POSTGRES_SSLMODE",
+			Detail:    "invalid SSL mode",
+			Expected:  "one of: disable, allow, prefer, require, verify-ca, verify-full",
+		}
+	}
+
+	if cfg.SSLMode == "verify-ca" || cfg.SSLMode == "verify-full" {
+		if cfg.SSLRootCert == "" {
+			return Config{}, &ConfigError{
+				Operation: "validation",
+				Variable:  "INIT_POSTGRES_SSLROOTCERT",
+				Detail:    "CA certificate required for selected SSL mode",
+				Expected:  "path to root CA certificate",
+			}
+		}
+
+		if _, err := os.Stat(cfg.SSLRootCert); err != nil {
+			return Config{}, &ConfigError{
+				Operation: "validation",
+				Variable:  "INIT_POSTGRES_SSLROOTCERT",
+				Detail:    "CA certificate file not found",
+				Expected:  "valid path to CA certificate file",
+				Err:       err,
+			}
+		}
+
+		certBytes, err := os.ReadFile(cfg.SSLRootCert)
+		if err != nil {
+			return Config{}, &ConfigError{
+				Operation: "validation",
+				Variable:  "INIT_POSTGRES_SSLROOTCERT",
+				Detail:    "failed to read CA certificate file",
+				Expected:  "accessible PEM-encoded X.509 certificate",
+				Err:       err,
+			}
+		}
+
+		certPool := x509.NewCertPool()
+		if !certPool.AppendCertsFromPEM(certBytes) {
+			return Config{}, &ConfigError{
+				Operation: "validation",
+				Variable:  "INIT_POSTGRES_SSLROOTCERT",
+				Detail:    "invalid CA certificate format",
+				Expected:  "PEM-encoded X.509 certificate",
+			}
+		}
+	}
+
 	return cfg, nil
 }
 
@@ -483,7 +540,7 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 		cfg.Port,
 		url.QueryEscape(cfg.SuperUser),
 		cfg.SSLMode,
-		url.QueryEscape(cfg.SSLRootCert),)
+		url.QueryEscape(cfg.SSLRootCert))
 
 	parsedConfig, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
