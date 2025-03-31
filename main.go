@@ -94,32 +94,32 @@ type Config struct {
 // ======================
 
 func (c Config) String() string {
-	sslColor := "\033[33m"
-	sslStatus := "⚠️"
-	if c.SSLMode == "verify-ca" || c.SSLMode == "verify-full" {
-		sslColor = "\033[32m"
-		sslStatus = "🔒"
-	} else if c.SSLMode == "disable" {
-		sslColor = "\033[31m"
-		sslStatus = "⛔"
-	}
+    sslColor := "\033[33m"
+    sslStatus := "⚠️"
+    if c.SSLMode == "verify-ca" || c.SSLMode == "verify-full" {
+        sslColor = "\033[32m"
+        sslStatus = "🔒"
+    } else if c.SSLMode == "disable" {
+        sslColor = "\033[31m"
+        sslStatus = "⛔"
+    }
 
-	return fmt.Sprintf(`
-\033[1;36m┌───────────────────────────────
-│ \033[1;34m%-15s\033[0m %-30q
-│ \033[1;34m%-15s\033[0m %-30d
-│ \033[1;34m%-15s\033[0m %-30q
-│ \033[1;34m%-15s\033[0m %-30s
-│ \033[1;34m%-15s\033[0m %s%-12s\033[0m %s
-│ \033[1;34m%-15s\033[0m %-30q
-\033[1;36m└───────────────────────────────\033[0m`,
-		"Host:", c.Host,
-		"Port:", c.Port,
-		"SuperUser:", c.SuperUser,
-		"Database:", c.DBName,
-		"SSL Mode:", sslColor, c.SSLMode, sslStatus,
-		"SSL Root Cert:", c.SSLRootCert,
-	)
+    return fmt.Sprintf(`
+\033[1;36m┌─────────────────────────────────────────
+│ \033[1;34m%-14s\033[0m %-30s
+│ \033[1;34m%-14s\033[0m %-30d
+│ \033[1;34m%-14s\033[0m %-30q
+│ \033[1;34m%-14s\033[0m %-30q
+│ \033[1;34m%-14s\033[0m %s%-17s\033[0m %s
+│ \033[1;34m%-14s\033[0m %-30q
+\033[1;36m└─────────────────────────────────────────\033[0m`,
+        "Host:", c.Host,
+        "Port:", c.Port,
+        "SuperUser:", c.SuperUser,
+        "Database:", c.DBName,
+        "SSL Mode:", sslColor, c.SSLMode, sslStatus,
+        "SSL Root Cert:", c.SSLRootCert,
+    )
 }
 
 func validatePassword(pass string) error {
