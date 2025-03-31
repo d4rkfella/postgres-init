@@ -477,69 +477,71 @@ func loadConfig() (Config, error) {
 }
 
 func createTLSConfig(sslMode, sslRootCert, host string) (*tls.Config, error) {
-	allowedModes := map[string]bool{
-		"disable": true, "allow": true, "prefer": true,
-		"require": true, "verify-ca": true, "verify-full": true,
-	}
+    allowedModes := map[string]bool{
+        "disable":    true,
+        "allow":      true,
+        "prefer":     true,
+        "require":    true,
+        "verify-ca":  true,
+        "verify-full": true,
+    }
 
-	if !allowedModes[sslMode] {
-		return nil, &ConfigError{
-			Operation: "ssl-config",
-			Variable:  "INIT_POSTGRES_SSLMODE",
-			Detail:    "invalid SSL mode",
-			Expected:  "one of: disable, allow, prefer, require, verify-ca, verify-full",
-		}
-	}
+    if !allowedModes[sslMode] {
+        return nil, &ConfigError{
+            Operation: "ssl-config",
+            Variable:  "INIT_POSTGRES_SSLMODE",
+            Detail:    "invalid SSL mode",
+            Expected:  "one of: disable, allow, prefer, require, verify-ca, verify-full",
+        }
+    }
 
-	if sslMode == "disable" {
-		return nil, nil
-	}
+    if sslMode == "disable" {
+        return nil, nil
+    }
 
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: sslMode == "require",
-	}
+    var tlsConfig *tls.Config
+    switch sslMode {
+    case "allow", "prefer", "require":
+        tlsConfig = &tls.Config{
+            InsecureSkipVerify: true,
+        }
+    case "verify-ca", "verify-full":
+        tlsConfig = &tls.Config{
+            ServerName: host,
+        }
+        if sslRootCert == "" {
+            return nil, &ConfigError{
+                Operation: "ssl-config",
+                Variable:  "INIT_POSTGRES_SSLROOTCERT",
+                Detail:    "CA certificate required",
+                Expected:  "path to root CA certificate",
+            }
+        }
+        if _, err := os.Stat(sslRootCert); err != nil {
+            return nil, &ConfigError{
+                Operation: "ssl-config",
+                Variable:  "INIT_POSTGRES_SSLROOTCERT",
+                Detail:    "CA certificate file not found",
+                Expected:  "valid path to CA certificate file",
+                Err:       err,
+            }
+        }
+        certBytes, err := os.ReadFile(sslRootCert)
+        if err != nil {
+            return nil, fmt.Errorf("read CA cert: %w", err)
+        }
+        tlsConfig.RootCAs = x509.NewCertPool()
+        if !tlsConfig.RootCAs.AppendCertsFromPEM(certBytes) {
+            return nil, &ConfigError{
+                Operation: "ssl-config",
+                Variable:  "INIT_POSTGRES_SSLROOTCERT",
+                Detail:    "failed to parse CA certificates",
+                Expected:  "PEM-encoded X.509 certificate(s)",
+            }
+        }
+    }
 
-	if sslMode == "verify-ca" || sslMode == "verify-full" {
-		if sslRootCert == "" {
-			return nil, &ConfigError{
-				Operation: "ssl-config",
-				Variable:  "INIT_POSTGRES_SSLROOTCERT",
-				Detail:    "CA certificate required",
-				Expected:  "path to root CA certificate",
-			}
-		}
-
-		if _, err := os.Stat(sslRootCert); err != nil {
-			return nil, &ConfigError{
-				Operation: "ssl-config",
-				Variable:  "INIT_POSTGRES_SSLROOTCERT",
-				Detail:    "CA certificate file not found",
-				Expected:  "valid path to CA certificate file",
-				Err:       err,
-			}
-		}
-
-		certBytes, err := os.ReadFile(sslRootCert)
-		if err != nil {
-			return nil, fmt.Errorf("read CA cert: %w", err)
-		}
-
-		tlsConfig.RootCAs = x509.NewCertPool()
-		if !tlsConfig.RootCAs.AppendCertsFromPEM(certBytes) {
-			return nil, &ConfigError{
-				Operation: "ssl-config",
-				Variable:  "INIT_POSTGRES_SSLROOTCERT",
-				Detail:    "failed to parse CA certificates",
-				Expected:  "PEM-encoded X.509 certificate(s)",
-			}
-		}
-
-		if sslMode == "verify-full" {
-			tlsConfig.ServerName = host
-		}
-	}
-
-	return tlsConfig, nil
+    return tlsConfig, nil
 }
 
 // ======================
