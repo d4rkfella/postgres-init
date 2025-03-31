@@ -89,6 +89,9 @@ type Config struct {
 	TLSConfig   *tls.Config
 }
 
+// ======================
+// Helper Functions
+// ======================
 func (c Config) String() string {
 	sslColor := "\033[33m"
 	sslStatus := "⚠️"
@@ -121,9 +124,6 @@ func (c Config) String() string {
 	)
 }
 
-// ======================
-// Helper Functions
-// ======================
 func validatePassword(pass string) error {
 	if len(pass) < 12 {
 		return fmt.Errorf("minimum 12 characters required")
