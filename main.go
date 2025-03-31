@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"net/url"
@@ -446,48 +445,6 @@ func loadConfig() (Config, error) {
 	cfg.UserFlags = os.Getenv("INIT_POSTGRES_USER_FLAGS")
 	cfg.SSLRootCert = os.Getenv("INIT_POSTGRES_SSLROOTCERT")
 
-	if cfg.SSLMode == "verify-ca" || cfg.SSLMode == "verify-full" {
-		if cfg.SSLRootCert == "" {
-			return Config{}, &ConfigError{
-				Operation: "validation",
-				Variable:  "INIT_POSTGRES_SSLROOTCERT",
-				Detail:    "CA certificate required for selected SSL mode",
-				Expected:  "path to root CA certificate",
-			}
-		}
-
-		if _, err := os.Stat(cfg.SSLRootCert); err != nil {
-			return Config{}, &ConfigError{
-				Operation: "validation",
-				Variable:  "INIT_POSTGRES_SSLROOTCERT",
-				Detail:    "CA certificate file not found",
-				Expected:  "valid path to CA certificate file",
-				Err:       err,
-			}
-		}
-
-		certBytes, err := os.ReadFile(cfg.SSLRootCert)
-		if err != nil {
-			return Config{}, &ConfigError{
-				Operation: "validation",
-				Variable:  "INIT_POSTGRES_SSLROOTCERT",
-				Detail:    "failed to read CA certificate file",
-				Expected:  "accessible PEM-encoded X.509 certificate",
-				Err:       err,
-			}
-		}
-
-		certPool := x509.NewCertPool()
-		if !certPool.AppendCertsFromPEM(certBytes) {
-			return Config{}, &ConfigError{
-				Operation: "validation",
-				Variable:  "INIT_POSTGRES_SSLROOTCERT",
-				Detail:    "invalid CA certificate format",
-				Expected:  "PEM-encoded X.509 certificate",
-			}
-		}
-	}
-
 	return cfg, nil
 }
 
@@ -512,7 +469,7 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 	if err != nil {
 		return nil, &ConfigError{
 			Operation: "connection string",
-			Detail:    "invalid connection string (check detailed error message below)",
+			Detail:    "error when parsing the connection string (check detailed error message below)",
 			Expected:  "valid PostgreSQL connection string",
 			Err:       err,
 		}
