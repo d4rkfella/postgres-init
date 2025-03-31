@@ -124,6 +124,26 @@ func (c Config) String() string {
 // ======================
 // Helper Functions
 // ======================
+func validatePassword(pass string) error {
+	if len(pass) < 12 {
+		return fmt.Errorf("minimum 12 characters required")
+	}
+	return nil
+}
+
+func getRequiredEnv(key string) (string, error) {
+	if value := os.Getenv(key); value != "" {
+		return value, nil
+	}
+	return "", fmt.Errorf("not set")
+}
+
+func getEnvWithDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
 
 func highlight(s string) string {
 	return fmt.Sprintf("\033[1;36m%s\033[0m", s)
@@ -156,6 +176,39 @@ func isAuthError(err error) bool {
 
 func quoteLiteral(literal string) string {
 	return "'" + strings.ReplaceAll(literal, "'", "''") + "'"
+}
+
+func encryptionStatus(state tls.ConnectionState) string {
+	if state.HandshakeComplete {
+		return "\033[32mENCRYPTED\033[0m"
+	}
+	return "\033[31mUNENCRYPTED\033[0m"
+}
+
+func tlsVersionToString(version uint16) string {
+	switch version {
+	case tls.VersionTLS13:
+		return "TLS 1.3"
+	case tls.VersionTLS12:
+		return "TLS 1.2"
+	case tls.VersionTLS11:
+		return "TLS 1.1"
+	case tls.VersionTLS10:
+		return "TLS 1.0"
+	default:
+		return fmt.Sprintf("0x%04X", version)
+	}
+}
+
+func versionSecurityStatus(version uint16) string {
+	switch version {
+	case tls.VersionTLS13:
+		return "\033[32m(Secure)\033[0m"
+	case tls.VersionTLS12:
+		return "\033[33m(Adequate)\033[0m"
+	default:
+		return "\033[31m(Insecure)\033[0m"
+	}
 }
 
 // ======================
@@ -228,25 +281,70 @@ func loadConfig() (Config, error) {
 	return cfg, nil
 }
 
-func validatePassword(pass string) error {
-	if len(pass) < 12 {
-		return fmt.Errorf("minimum 12 characters required")
+func createTLSConfig(sslMode, sslRootCert, host string) (*tls.Config, error) {
+	allowedModes := map[string]bool{
+		"disable": true, "allow": true, "prefer": true,
+		"require": true, "verify-ca": true, "verify-full": true,
 	}
-	return nil
-}
 
-func getRequiredEnv(key string) (string, error) {
-	if value := os.Getenv(key); value != "" {
-		return value, nil
+	if !allowedModes[sslMode] {
+		return nil, &ConfigError{
+			Operation: "ssl-config",
+			Variable:  "INIT_POSTGRES_SSLMODE",
+			Detail:    "invalid SSL mode",
+			Expected:  "one of: disable, allow, prefer, require, verify-ca, verify-full",
+		}
 	}
-	return "", fmt.Errorf("not set")
-}
 
-func getEnvWithDefault(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
+	if sslMode == "disable" {
+		return nil, nil
 	}
-	return defaultValue
+
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: sslMode == "require",
+	}
+
+	if sslMode == "verify-ca" || sslMode == "verify-full" {
+		if sslRootCert == "" {
+			return nil, &ConfigError{
+				Operation: "ssl-config",
+				Variable:  "INIT_POSTGRES_SSLROOTCERT",
+				Detail:    "CA certificate required",
+				Expected:  "path to root CA certificate",
+			}
+		}
+
+		if _, err := os.Stat(sslRootCert); err != nil {
+			return nil, &ConfigError{
+				Operation: "ssl-config",
+				Variable:  "INIT_POSTGRES_SSLROOTCERT",
+				Detail:    "CA certificate file not found",
+				Expected:  "valid path to CA certificate file",
+				Err:       err,
+			}
+		}
+
+		certBytes, err := os.ReadFile(sslRootCert)
+		if err != nil {
+			return nil, fmt.Errorf("read CA cert: %w", err)
+		}
+
+		tlsConfig.RootCAs = x509.NewCertPool()
+		if !tlsConfig.RootCAs.AppendCertsFromPEM(certBytes) {
+			return nil, &ConfigError{
+				Operation: "ssl-config",
+				Variable:  "INIT_POSTGRES_SSLROOTCERT",
+				Detail:    "failed to parse CA certificates",
+				Expected:  "PEM-encoded X.509 certificate(s)",
+			}
+		}
+
+		if sslMode == "verify-full" {
+			tlsConfig.ServerName = host
+		}
+	}
+
+	return tlsConfig, nil
 }
 
 // ======================
@@ -381,105 +479,6 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 		Advice:    "Check database availability and network stability",
 		Err:       err,
 	}
-}
-
-func encryptionStatus(state tls.ConnectionState) string {
-	if state.HandshakeComplete {
-		return "\033[32mENCRYPTED\033[0m"
-	}
-	return "\033[31mUNENCRYPTED\033[0m"
-}
-
-func tlsVersionToString(version uint16) string {
-	switch version {
-	case tls.VersionTLS13:
-		return "TLS 1.3"
-	case tls.VersionTLS12:
-		return "TLS 1.2"
-	case tls.VersionTLS11:
-		return "TLS 1.1"
-	case tls.VersionTLS10:
-		return "TLS 1.0"
-	default:
-		return fmt.Sprintf("0x%04X", version)
-	}
-}
-
-func versionSecurityStatus(version uint16) string {
-	switch version {
-	case tls.VersionTLS13:
-		return "\033[32m(Secure)\033[0m"
-	case tls.VersionTLS12:
-		return "\033[33m(Adequate)\033[0m"
-	default:
-		return "\033[31m(Insecure)\033[0m"
-	}
-}
-
-func createTLSConfig(sslMode, sslRootCert, host string) (*tls.Config, error) {
-	allowedModes := map[string]bool{
-		"disable": true, "allow": true, "prefer": true,
-		"require": true, "verify-ca": true, "verify-full": true,
-	}
-
-	if !allowedModes[sslMode] {
-		return nil, &ConfigError{
-			Operation: "ssl-config",
-			Variable:  "INIT_POSTGRES_SSLMODE",
-			Detail:    "invalid SSL mode",
-			Expected:  "one of: disable, allow, prefer, require, verify-ca, verify-full",
-		}
-	}
-
-	if sslMode == "disable" {
-		return nil, nil
-	}
-
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: sslMode == "require",
-	}
-
-	if sslMode == "verify-ca" || sslMode == "verify-full" {
-		if sslRootCert == "" {
-			return nil, &ConfigError{
-				Operation: "ssl-config",
-				Variable:  "INIT_POSTGRES_SSLROOTCERT",
-				Detail:    "CA certificate required",
-				Expected:  "path to root CA certificate",
-			}
-		}
-
-		if _, err := os.Stat(sslRootCert); err != nil {
-			return nil, &ConfigError{
-				Operation: "ssl-config",
-				Variable:  "INIT_POSTGRES_SSLROOTCERT",
-				Detail:    "CA certificate file not found",
-				Expected:  "valid path to CA certificate file",
-				Err:       err,
-			}
-		}
-
-		certBytes, err := os.ReadFile(sslRootCert)
-		if err != nil {
-			return nil, fmt.Errorf("read CA cert: %w", err)
-		}
-
-		tlsConfig.RootCAs = x509.NewCertPool()
-		if !tlsConfig.RootCAs.AppendCertsFromPEM(certBytes) {
-			return nil, &ConfigError{
-				Operation: "ssl-config",
-				Variable:  "INIT_POSTGRES_SSLROOTCERT",
-				Detail:    "failed to parse CA certificates",
-				Expected:  "PEM-encoded X.509 certificate(s)",
-			}
-		}
-
-		if sslMode == "verify-full" {
-			tlsConfig.ServerName = host
-		}
-	}
-
-	return tlsConfig, nil
 }
 
 func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
