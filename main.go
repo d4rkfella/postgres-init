@@ -565,8 +565,7 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 		url.QueryEscape(cfg.SuperPass),
 		cfg.Host,
 		cfg.Port,
-		url.QueryEscape(cfg.DBName),
-		url.QueryEscape(cfg.SSLMode))
+		url.QueryEscape(cfg.SuperUser))
 
 	parsedConfig, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
