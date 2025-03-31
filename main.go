@@ -146,36 +146,30 @@ func handleSuccessfulConnection(pool *pgxpool.Pool, cfg Config) (*pgxpool.Pool, 
 }
 
 func printSSLInfo(state tls.ConnectionState, cfg Config) {
-	verifiedStatus := "⚠️ Unverified"
-	if len(state.VerifiedChains) > 0 {
-		switch {
-		case cfg.SSLMode == "verify-full":
-			if err := state.PeerCertificates[0].VerifyHostname(cfg.Host); err == nil {
-				verifiedStatus = "✅ Full Verification (CA+Hostname)"
-			} else {
-				verifiedStatus = fmt.Sprintf("\033[31m⛔ Host mismatch: %v\033[0m", err)
-			}
-		case cfg.SSLMode == "verify-ca":
-			verifiedStatus = "✅ CA Verified"
-		default:
-			verifiedStatus = "🔒 Encrypted (Basic TLS)"
-		}
-	} else if cfg.SSLMode == "require" {
-		verifiedStatus = "🔒 Encrypted (No Validation)"
-	}
-
 	fmt.Printf("\n\033[36m🔐 SSL Connection State:\033[0m\n")
-	fmt.Printf("├─ \033[1;34mStatus:\033[0m    %s\n", encryptionStatus(state))
+	fmt.Printf("├─ \033[1;34mStatus:\033[0m    \033[32mENCRYPTED\033[0m\n")
 	fmt.Printf("├─ \033[1;34mVersion:\033[0m   %s %s\n",
 		tlsVersionToString(state.Version),
 		versionSecurityStatus(state.Version))
 	fmt.Printf("├─ \033[1;34mCipher:\033[0m   %s\n", tls.CipherSuiteName(state.CipherSuite))
-	fmt.Printf("╰─ \033[1;34mValidation:\033[0m %s\n\n", verifiedStatus)
-}
 
-func sanitizeError(err error, password string) string {
-	msg := err.Error()
-	return strings.ReplaceAll(msg, password, "*****")
+	var verifiedStatus string
+	switch {
+	case len(state.VerifiedChains) > 0 && cfg.SSLMode == "verify-full":
+		if err := state.PeerCertificates[0].VerifyHostname(cfg.Host); err == nil {
+			verifiedStatus = "✅ Full Verification (CA+Hostname)"
+		} else {
+			verifiedStatus = fmt.Sprintf("⛔ Host mismatch: %v", err)
+		}
+
+	case len(state.VerifiedChains) > 0:
+		verifiedStatus = "✅ CA Verified"
+
+	default:
+		verifiedStatus = "🔒 Encrypted (No Validation)"
+	}
+
+	fmt.Printf("╰─ \033[1;34mValidation:\033[0m %s\n\n", verifiedStatus)
 }
 
 func classifyPostgresError(err error, cfg Config, operation string) *DatabaseError {
@@ -314,13 +308,6 @@ func quoteLiteral(literal string) string {
 	return "'" + strings.ReplaceAll(literal, "'", "''") + "'"
 }
 
-func encryptionStatus(state tls.ConnectionState) string {
-	if state.HandshakeComplete {
-		return "\033[32mENCRYPTED\033[0m"
-	}
-	return "\033[31mUNENCRYPTED\033[0m"
-}
-
 func tlsVersionToString(version uint16) string {
 	switch version {
 	case tls.VersionTLS13:
@@ -384,7 +371,6 @@ func parseUserFlags(flags string) (string, error) {
 			continue
 		}
 
-		// Convert flags to PostgreSQL keywords
 		pgFlag := strings.ToUpper(strings.TrimPrefix(baseFlag, "--"))
 		pgFlag = strings.ReplaceAll(pgFlag, "-", " ")
 		validFlags = append(validFlags, pgFlag)
@@ -421,20 +407,11 @@ func loadConfig() (Config, error) {
 		}
 	}
 
-	if err := validatePassword(cfg.SuperPass); err != nil {
-		return Config{}, &ConfigError{
-			Operation: "validation",
-			Variable:  "INIT_POSTGRES_SUPER_PASS",
-			Detail:    "invalid superuser password",
-			Expected:  err.Error(),
-		}
-	}
-
 	if err := validatePassword(cfg.UserPass); err != nil {
 		return Config{}, &ConfigError{
 			Operation: "validation",
 			Variable:  "INIT_POSTGRES_PASS",
-			Detail:    "invalid application user password",
+			Detail:    "failed to validate application user password",
 			Expected:  err.Error(),
 		}
 	}
@@ -506,20 +483,19 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 
 		if attempt < maxAttempts {
 			fmt.Printf("\033[33m⏳ Connection attempt %d/%d failed: %v. Retrying...\033[0m\n",
-				attempt, maxAttempts, sanitizeError(err, cfg.SuperPass))
+				attempt, maxAttempts, err)
 			select {
 			case <-time.After(baseDelay * time.Duration(attempt)):
 			case <-ctx.Done():
-				return nil, classifyPostgresError(ctx.Err(), cfg, "connection")
+				return nil, fmt.Errorf("context cancelled or timed out: %w", ctx.Err())
 			}
 		}
 	}
 
-	return nil, classifyPostgresError(
-		fmt.Errorf("failed after %d attempts", maxAttempts),
-		cfg,
-		"connection",
-	)
+	if dbErr := classifyPostgresError(err, cfg, "connection"); dbErr != nil {
+		return nil, dbErr
+	}
+	return nil, fmt.Errorf("failed to connect after %d attempts: %w", maxAttempts, err)
 }
 
 func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
