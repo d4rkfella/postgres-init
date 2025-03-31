@@ -175,22 +175,23 @@ func printSSLInfo(state tls.ConnectionState, cfg Config) {
 func classifyPostgresError(err error, cfg Config, operation string) *DatabaseError {
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {
-		return nil
+		return nil // Non-PostgreSQL errors handled elsewhere
 	}
 
 	newDBError := func(op, detail, advice string) *DatabaseError {
 		target := cfg.Host
-		if op == "authentication" {
+		switch {
+		case op == "authentication":
 			target = fmt.Sprintf("%s@%s", cfg.SuperUser, target)
-		} else if strings.Contains(op, "user") {
+		case strings.Contains(op, "user"):
 			target = cfg.User
-		} else if strings.Contains(op, "database") {
+		case strings.Contains(op, "database"):
 			target = cfg.DBName
 		}
 
 		return &DatabaseError{
 			Operation: op,
-			Detail:    detail,
+			Detail:    fmt.Sprintf("%s (PGCODE: %s)", detail, pgErr.Code),
 			Target:    target,
 			Code:      pgErr.Code,
 			Advice:    advice,
@@ -206,8 +207,9 @@ func classifyPostgresError(err error, cfg Config, operation string) *DatabaseErr
 	case "database_management":
 		return classifyDatabaseError(pgErr, newDBError)
 	default:
-		return newDBError(operation, pgErr.Message,
-			"Check PostgreSQL logs for detailed error information")
+		return newDBError("system",
+			fmt.Sprintf("unhandled operation type: %s", operation),
+			"Contact system administrator")
 	}
 }
 
@@ -231,7 +233,9 @@ func classifyConnectionError(pgErr *pgconn.PgError, newDBError func(op, detail, 
 	case "57P03":
 		return newDBError("connection", "database is starting up", "Wait for database to become ready")
 	default:
-		return nil
+		return newDBError("connection",
+			"unhandled PostgreSQL connection error",
+			fmt.Sprintf("Consult PostgreSQL documentation for error code: %s", pgErr.Code))
 	}
 }
 
@@ -247,7 +251,9 @@ func classifyUserError(pgErr *pgconn.PgError, newDBError func(op, detail, advice
 		return newDBError("privileges", "insufficient privileges for user operation",
 			"Use a superuser account or request proper privileges")
 	default:
-		return nil
+		return newDBError("user",
+			"unhandled PostgreSQL user management error",
+			fmt.Sprintf("Consult PostgreSQL documentation for error code: %s", pgErr.Code))
 	}
 }
 
@@ -263,7 +269,9 @@ func classifyDatabaseError(pgErr *pgconn.PgError, newDBError func(op, detail, ad
 		return newDBError("database_access", "database does not exist",
 			"Verify database name or create it first")
 	default:
-		return nil
+		return newDBError("database",
+			"unhandled PostgreSQL database error",
+			fmt.Sprintf("Consult PostgreSQL documentation for error code: %s", pgErr.Code))
 	}
 }
 
@@ -469,6 +477,11 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 		}
 	}()
 
+	var (
+		fatalErr *DatabaseError
+		lastErr  error
+	)
+
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		err = pool.Ping(ctx)
 		if err == nil {
@@ -477,27 +490,38 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 
 		if dbErr := classifyPostgresError(err, cfg, "connection"); dbErr != nil {
 			if isFatalError(dbErr.Operation) {
-				return nil, dbErr
+				fatalErr = dbErr
+				break
 			}
+			lastErr = dbErr
+		} else {
+			lastErr = err
 		}
 
 		if attempt < maxAttempts {
 			fmt.Printf("\033[33m⏳ Connection attempt %d/%d failed: %v. Retrying...\033[0m\n",
-				attempt, maxAttempts, err)
+				attempt, maxAttempts, lastErr)
+
 			select {
 			case <-time.After(baseDelay * time.Duration(attempt)):
 			case <-ctx.Done():
-				return nil, fmt.Errorf("context cancelled or timed out: %w", ctx.Err())
+				ctxErr := fmt.Errorf("context cancelled: %w", ctx.Err())
+				combinedErr := fmt.Errorf("%v (last error: %w)", ctxErr, lastErr)
+				return nil, combinedErr
 			}
 		}
 	}
 
-	if dbErr := classifyPostgresError(err, cfg, "connection"); dbErr != nil {
-		return nil, dbErr
+	if fatalErr != nil {
+		return nil, fatalErr
 	}
-	return nil, fmt.Errorf("failed to connect after %d attempts: %w", maxAttempts, err)
-}
 
+	if lastErr != nil {
+		return nil, fmt.Errorf("failed after %d attempts: %w", maxAttempts, lastErr)
+	}
+
+	return nil, fmt.Errorf("connection failed after %d attempts (unknown reason)", maxAttempts)
+}
 func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
