@@ -92,6 +92,7 @@ type Config struct {
 // ======================
 // Helper Functions
 // ======================
+
 func (c Config) String() string {
 	sslColor := "\033[33m"
 	sslStatus := "⚠️"
@@ -105,8 +106,6 @@ func (c Config) String() string {
 
 	return fmt.Sprintf(`
 \033[1;36m┌───────────────────────────────
-│ \033[1;35mDatabase Configuration %s\033[1;36m
-├───────────────────────────────
 │ \033[1;34m%-15s\033[0m %-30q
 │ \033[1;34m%-15s\033[0m %-30d
 │ \033[1;34m%-15s\033[0m %-30q
@@ -114,7 +113,6 @@ func (c Config) String() string {
 │ \033[1;34m%-15s\033[0m %s%-12s\033[0m %s
 │ \033[1;34m%-15s\033[0m %-30q
 \033[1;36m└───────────────────────────────\033[0m`,
-		sslStatus,
 		"Host:", c.Host,
 		"Port:", c.Port,
 		"SuperUser:", c.SuperUser,
@@ -209,6 +207,55 @@ func versionSecurityStatus(version uint16) string {
 	default:
 		return "\033[31m(Insecure)\033[0m"
 	}
+}
+
+func parseUserFlags(flags string) (string, error) {
+	validFlags := make([]string, 0)
+	allowedFlags := map[string]bool{
+		// Boolean privileges
+		"--login":          true, // LOGIN
+		"--no-login":       true, // NOLOGIN
+		"--createdb":       true, // CREATEDB
+		"--no-createdb":    true, // NOCREATEDB
+		"--createrole":     true, // CREATEROLE
+		"--no-createrole":  true, // NOCREATEROLE
+		"--inherit":        true, // INHERIT
+		"--no-inherit":     true, // NOINHERIT
+		"--replication":    true, // REPLICATION
+		"--no-replication": true, // NOREPLICATION
+		"--superuser":      true, // SUPERUSER
+		"--no-superuser":   true, // NOSUPERUSER
+		"--bypassrls":      true, // BYPASSRLS (PostgreSQL 9.5+)
+		"--no-bypassrls":   true, // NOBYPASSRLS
+
+		// Connection limits
+		"--connection-limit": true, // Needs separate value handling
+	}
+
+	for _, flag := range strings.Fields(flags) {
+		parts := strings.SplitN(flag, "=", 2)
+		baseFlag := parts[0]
+
+		if !allowedFlags[baseFlag] {
+			return "", fmt.Errorf("unsupported user flag: %s", baseFlag)
+		}
+
+		// Handle connection limit separately
+		if baseFlag == "--connection-limit" {
+			if len(parts) != 2 {
+				return "", fmt.Errorf("connection limit requires a value")
+			}
+			validFlags = append(validFlags, fmt.Sprintf("CONNECTION LIMIT %s", parts[1]))
+			continue
+		}
+
+		// Convert flags to PostgreSQL keywords
+		pgFlag := strings.ToUpper(strings.TrimPrefix(baseFlag, "--"))
+		pgFlag = strings.ReplaceAll(pgFlag, "-", " ")
+		validFlags = append(validFlags, pgFlag)
+	}
+
+	return strings.Join(validFlags, " "), nil
 }
 
 // ======================
@@ -556,20 +603,6 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	return tx.Commit(ctx)
 }
 
-func parseUserFlags(flags string) (string, error) {
-	var validFlags []string
-	for _, flag := range strings.Fields(flags) {
-		switch flag {
-		case "--createdb", "--createrole", "--inherit", "--no-login",
-			"--replication", "--superuser", "--no-superuser":
-			validFlags = append(validFlags, strings.TrimPrefix(flag, "--"))
-		default:
-			return "", fmt.Errorf("unsupported user flag: %s", flag)
-		}
-	}
-	return strings.Join(validFlags, " "), nil
-}
-
 func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -650,7 +683,7 @@ func run() error {
 		return err
 	}
 
-	fmt.Printf("\n\033[1;35m📋 Loaded Configuration\033[0m\n%s\n", cfg.String())
+	fmt.Printf("\n\033[1;35m📋 Loaded Configuration\033[0m\n%s", cfg.String())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
