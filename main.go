@@ -94,17 +94,17 @@ type Config struct {
 // ======================
 
 func (c Config) String() string {
-    sslColor := "\033[33m"
-    sslStatus := "⚠️"
-    if c.SSLMode == "verify-ca" || c.SSLMode == "verify-full" {
-        sslColor = "\033[32m"
-        sslStatus = "🔒"
-    } else if c.SSLMode == "disable" {
-        sslColor = "\033[31m"
-        sslStatus = "⛔"
-    }
+	sslColor := "\033[33m"
+	sslStatus := "⚠️"
+	if c.SSLMode == "verify-ca" || c.SSLMode == "verify-full" {
+		sslColor = "\033[32m"
+		sslStatus = "🔒"
+	} else if c.SSLMode == "disable" {
+		sslColor = "\033[31m"
+		sslStatus = "⛔"
+	}
 
-    return fmt.Sprintf(`
+	return fmt.Sprintf(`
 \033[1;36m┌─────────────────────────────────────────
 │ \033[1;34m%-14s\033[0m %-30s
 │ \033[1;34m%-14s\033[0m %-30d
@@ -113,114 +113,114 @@ func (c Config) String() string {
 │ \033[1;34m%-14s\033[0m %s%-17s\033[0m %s
 │ \033[1;34m%-14s\033[0m %-30q
 \033[1;36m└─────────────────────────────────────────\033[0m`,
-        "Host:", c.Host,
-        "Port:", c.Port,
-        "SuperUser:", c.SuperUser,
-        "Database:", c.DBName,
-        "SSL Mode:", sslColor, c.SSLMode, sslStatus,
-        "SSL Root Cert:", c.SSLRootCert,
-    )
+		"Host:", c.Host,
+		"Port:", c.Port,
+		"SuperUser:", c.SuperUser,
+		"Database:", c.DBName,
+		"SSL Mode:", sslColor, c.SSLMode, sslStatus,
+		"SSL Root Cert:", c.SSLRootCert,
+	)
 }
 
 func handleSuccessfulConnection(pool *pgxpool.Pool, cfg Config) (*pgxpool.Pool, error) {
-    fmt.Printf("\033[32m✅ Successfully connected to %s:%d\033[0m\n", cfg.Host, cfg.Port)
+	fmt.Printf("\033[32m✅ Successfully connected to %s:%d\033[0m\n", cfg.Host, cfg.Port)
 
-    if cfg.SSLMode != "disable" {
-        conn, err := pool.Acquire(context.Background())
-        if err != nil {
-            return nil, &DatabaseError{
-                Operation: "ssl-check",
-                Detail:    "failed to acquire connection for SSL verification",
-                Target:    cfg.Host,
-                Advice:    "Check connection pool health",
-                Err:       err,
-            }
-        }
-        defer conn.Release()
+	if cfg.SSLMode != "disable" {
+		conn, err := pool.Acquire(context.Background())
+		if err != nil {
+			return nil, &DatabaseError{
+				Operation: "ssl-check",
+				Detail:    "failed to acquire connection for SSL verification",
+				Target:    cfg.Host,
+				Advice:    "Check connection pool health",
+				Err:       err,
+			}
+		}
+		defer conn.Release()
 
-        if tlsConn, ok := conn.Conn().PgConn().Conn().(*tls.Conn); ok {
-            printSSLInfo(tlsConn.ConnectionState(), cfg)
-        }
-    } else {
-        fmt.Printf("\n\033[33m⚠️  Connection is \033[1;31mUNENCRYPTED\033[0m\033[33m (SSL disabled)\033[0m\n")
-    }
+		if tlsConn, ok := conn.Conn().PgConn().Conn().(*tls.Conn); ok {
+			printSSLInfo(tlsConn.ConnectionState(), cfg)
+		}
+	} else {
+		fmt.Printf("\n\033[33m⚠️  Connection is \033[1;31mUNENCRYPTED\033[0m\033[33m (SSL disabled)\033[0m\n")
+	}
 
-    return pool, nil
+	return pool, nil
 }
 
 func printSSLInfo(state tls.ConnectionState, cfg Config) {
-    verifiedStatus := "⚠️ Unverified"
-    if len(state.VerifiedChains) > 0 {
-        switch {
-        case cfg.SSLMode == "verify-full":
-            if err := state.PeerCertificates[0].VerifyHostname(cfg.Host); err == nil {
-                verifiedStatus = "✅ Full Verification (CA+Hostname)"
-            } else {
-                verifiedStatus = fmt.Sprintf("\033[31m⛔ Host mismatch: %v\033[0m", err)
-            }
-        case cfg.SSLMode == "verify-ca":
-            verifiedStatus = "✅ CA Verified"
-        default:
-            verifiedStatus = "🔒 Encrypted (Basic TLS)"
-        }
-    } else if cfg.SSLMode == "require" {
-        verifiedStatus = "🔒 Encrypted (No Validation)"
-    }
+	verifiedStatus := "⚠️ Unverified"
+	if len(state.VerifiedChains) > 0 {
+		switch {
+		case cfg.SSLMode == "verify-full":
+			if err := state.PeerCertificates[0].VerifyHostname(cfg.Host); err == nil {
+				verifiedStatus = "✅ Full Verification (CA+Hostname)"
+			} else {
+				verifiedStatus = fmt.Sprintf("\033[31m⛔ Host mismatch: %v\033[0m", err)
+			}
+		case cfg.SSLMode == "verify-ca":
+			verifiedStatus = "✅ CA Verified"
+		default:
+			verifiedStatus = "🔒 Encrypted (Basic TLS)"
+		}
+	} else if cfg.SSLMode == "require" {
+		verifiedStatus = "🔒 Encrypted (No Validation)"
+	}
 
-    fmt.Printf("\n\033[36m🔐 SSL Connection State:\033[0m\n")
-    fmt.Printf("├─ \033[1;34mStatus:\033[0m    %s\n", encryptionStatus(state))
-    fmt.Printf("├─ \033[1;34mVersion:\033[0m   %s %s\n",
-        tlsVersionToString(state.Version),
-        versionSecurityStatus(state.Version))
-    fmt.Printf("├─ \033[1;34mCipher:\033[0m   %s\n", tls.CipherSuiteName(state.CipherSuite))
-    fmt.Printf("╰─ \033[1;34mValidation:\033[0m %s\n\n", verifiedStatus)
+	fmt.Printf("\n\033[36m🔐 SSL Connection State:\033[0m\n")
+	fmt.Printf("├─ \033[1;34mStatus:\033[0m    %s\n", encryptionStatus(state))
+	fmt.Printf("├─ \033[1;34mVersion:\033[0m   %s %s\n",
+		tlsVersionToString(state.Version),
+		versionSecurityStatus(state.Version))
+	fmt.Printf("├─ \033[1;34mCipher:\033[0m   %s\n", tls.CipherSuiteName(state.CipherSuite))
+	fmt.Printf("╰─ \033[1;34mValidation:\033[0m %s\n\n", verifiedStatus)
 }
 
 func sanitizeError(err error, password string) string {
-    msg := err.Error()
-    return strings.ReplaceAll(msg, password, "*****")
+	msg := err.Error()
+	return strings.ReplaceAll(msg, password, "*****")
 }
 
 func classifyAndCreateError(err error, cfg Config) *DatabaseError {
-    var pgErr *pgconn.PgError
-    if !errors.As(err, &pgErr) {
-        return nil
-    }
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return nil
+	}
 
-    switch {
-    case pgErr.Code == "28P01":
-        return &DatabaseError{
-            Operation: "authentication",
-            Detail:    "invalid password",
-            Target:    fmt.Sprintf("%s@%s:%d", cfg.SuperUser, cfg.Host, cfg.Port),
-            Code:      pgErr.Code,
-            Advice:    "Verify password for database user",
-            Err:       err,
-        }
-    case pgErr.Code == "28000" && strings.Contains(pgErr.Message, "no encryption"):
-        return &DatabaseError{
-            Operation: "connection",
-            Detail:    "server requires SSL",
-            Target:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-            Code:      pgErr.Code,
-            Advice:    "Set SSLMode to 'require' or higher",
-            Err:       err,
-        }
-    case pgErr.Code == "3D000":
-        return &DatabaseError{
-            Operation: "connection",
-            Detail:    "database does not exist",
-            Target:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-            Code:      pgErr.Code,
-            Advice:    "Verify database name exists",
-            Err:       err,
-        }
-    }
-    return nil
+	switch {
+	case pgErr.Code == "28P01":
+		return &DatabaseError{
+			Operation: "authentication",
+			Detail:    "invalid password",
+			Target:    fmt.Sprintf("%s@%s:%d", cfg.SuperUser, cfg.Host, cfg.Port),
+			Code:      pgErr.Code,
+			Advice:    "Verify password for database user",
+			Err:       err,
+		}
+	case pgErr.Code == "28000" && strings.Contains(pgErr.Message, "no encryption"):
+		return &DatabaseError{
+			Operation: "connection",
+			Detail:    "server requires SSL",
+			Target:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+			Code:      pgErr.Code,
+			Advice:    "Set SSLMode to 'require' or higher",
+			Err:       err,
+		}
+	case pgErr.Code == "3D000":
+		return &DatabaseError{
+			Operation: "connection",
+			Detail:    "database does not exist",
+			Target:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+			Code:      pgErr.Code,
+			Advice:    "Verify database name exists",
+			Err:       err,
+		}
+	}
+	return nil
 }
 
 func isFatalError(operation string) bool {
-    return operation == "authentication" || operation == "ssl_configuration"
+	return operation == "authentication" || operation == "ssl_configuration"
 }
 
 func validatePassword(pass string) error {
@@ -500,78 +500,78 @@ func createTLSConfig(sslMode, sslRootCert, host string) (*tls.Config, error) {
 // ======================
 
 func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
-    const maxAttempts = 30
-    const baseDelay = 1 * time.Second
+	const maxAttempts = 30
+	const baseDelay = 1 * time.Second
 
-    connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
-        url.QueryEscape(cfg.SuperUser),
-        url.QueryEscape(cfg.SuperPass),
-        cfg.Host,
-        cfg.Port,
-        url.QueryEscape(cfg.SuperUser),
-        url.QueryEscape(cfg.SSLMode))
+	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+		url.QueryEscape(cfg.SuperUser),
+		url.QueryEscape(cfg.SuperPass),
+		cfg.Host,
+		cfg.Port,
+		url.QueryEscape(cfg.SuperUser),
+		url.QueryEscape(cfg.SSLMode))
 
-    parsedConfig, err := pgxpool.ParseConfig(connStr)
-    if err != nil {
-        return nil, &DatabaseError{
-            Operation: "configuration",
-            Detail:    "invalid connection parameters",
-            Target:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-            Err:       err,
-        }
-    }
+	parsedConfig, err := pgxpool.ParseConfig(connStr)
+	if err != nil {
+		return nil, &DatabaseError{
+			Operation: "configuration",
+			Detail:    "invalid connection parameters",
+			Target:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+			Err:       err,
+		}
+	}
 
-    if cfg.SSLMode != "disable" {
-        parsedConfig.ConnConfig.TLSConfig = cfg.TLSConfig
-    }
+	if cfg.SSLMode != "disable" {
+		parsedConfig.ConnConfig.TLSConfig = cfg.TLSConfig
+	}
 
-    parsedConfig.MaxConns = 3
-    parsedConfig.MinConns = 1
-    parsedConfig.MaxConnLifetime = 5 * time.Minute
-    parsedConfig.ConnConfig.ConnectTimeout = 10 * time.Second
+	parsedConfig.MaxConns = 3
+	parsedConfig.MinConns = 1
+	parsedConfig.MaxConnLifetime = 5 * time.Minute
+	parsedConfig.ConnConfig.ConnectTimeout = 10 * time.Second
 
-    pool, err := pgxpool.NewWithConfig(ctx, parsedConfig)
-    if err != nil {
-        return nil, classifyAndCreateError(err, cfg)
-    }
+	pool, err := pgxpool.NewWithConfig(ctx, parsedConfig)
+	if err != nil {
+		return nil, classifyAndCreateError(err, cfg)
+	}
 
-    defer func() {
-        if err != nil {
-            pool.Close()
-            fmt.Printf("\033[33m⚠️ Closed connection pool due to initialization failure\033[0m\n")
-        }
-    }()
+	defer func() {
+		if err != nil {
+			pool.Close()
+			fmt.Printf("\033[33m⚠️ Closed connection pool due to initialization failure\033[0m\n")
+		}
+	}()
 
-    for attempt := 1; attempt <= maxAttempts; attempt++ {
-        err = pool.Ping(ctx)
-        if err == nil {
-            return handleSuccessfulConnection(pool, cfg)
-        }
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		err = pool.Ping(ctx)
+		if err == nil {
+			return handleSuccessfulConnection(pool, cfg)
+		}
 
-        if dbErr := classifyAndCreateError(err, cfg); dbErr != nil {
-            if isFatalError(dbErr.Operation) {
-                return nil, dbErr
-            }
-        }
+		if dbErr := classifyAndCreateError(err, cfg); dbErr != nil {
+			if isFatalError(dbErr.Operation) {
+				return nil, dbErr
+			}
+		}
 
-        if attempt < maxAttempts {
-            fmt.Printf("\033[33m⏳ Connection attempt %d/%d failed: %v. Retrying...\033[0m\n",
-                attempt, maxAttempts, sanitizeError(err, cfg.SuperPass))
-            select {
-            case <-time.After(baseDelay * time.Duration(attempt)):
-            case <-ctx.Done():
-                return nil, ctx.Err()
-            }
-        }
-    }
+		if attempt < maxAttempts {
+			fmt.Printf("\033[33m⏳ Connection attempt %d/%d failed: %v. Retrying...\033[0m\n",
+				attempt, maxAttempts, sanitizeError(err, cfg.SuperPass))
+			select {
+			case <-time.After(baseDelay * time.Duration(attempt)):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	}
 
-    return nil, &DatabaseError{
-        Operation: "connection",
-        Detail:    fmt.Sprintf("failed after %d attempts", maxAttempts),
-        Target:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-        Advice:    "Check database availability and network stability",
-        Err:       err,
-    }
+	return nil, &DatabaseError{
+		Operation: "connection",
+		Detail:    fmt.Sprintf("failed after %d attempts", maxAttempts),
+		Target:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		Advice:    "Check database availability and network stability",
+		Err:       err,
+	}
 }
 
 func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
