@@ -581,18 +581,11 @@ func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 }
 
 func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
-	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return classifyPostgresError(err, cfg, "database_management")
-	}
-	defer tx.Rollback(ctx)
-
 	var exists bool
-	err = tx.QueryRow(ctx,
+	err := pool.QueryRow(ctx,
 		"SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)",
 		cfg.DBName,
 	).Scan(&exists)
-
 	if err != nil {
 		return classifyPostgresError(err, cfg, "database_management")
 	}
@@ -603,10 +596,17 @@ func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 			pgx.Identifier{cfg.DBName}.Sanitize(),
 			pgx.Identifier{cfg.User}.Sanitize())
 
-		if _, err = tx.Exec(ctx, sql); err != nil {
+		_, err = pool.Exec(ctx, sql)
+		if err != nil {
 			return classifyPostgresError(err, cfg, "database_creation")
 		}
 	}
+
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return classifyPostgresError(err, cfg, "database_management")
+	}
+	defer tx.Rollback(ctx)
 
 	fmt.Printf("\033[32m🔑 Granting privileges on %q to %q...\033[0m\n", cfg.DBName, cfg.User)
 	sql := fmt.Sprintf("GRANT ALL PRIVILEGES ON DATABASE %s TO %s",
