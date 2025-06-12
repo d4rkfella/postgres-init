@@ -1053,9 +1053,10 @@ func TestValidateSSLConfig(t *testing.T) {
 		{
 			name: "Missing cert for require mode",
 			config: Config{
-				SSLMode: "require",
+				SSLMode:     "require",
+				SSLRootCert: "",
 			},
-			expectError: true,
+			expectError: false,
 		},
 		{
 			name: "Invalid SSL mode",
@@ -1068,6 +1069,62 @@ func TestValidateSSLConfig(t *testing.T) {
 			name: "Non-existent cert file",
 			config: Config{
 				SSLMode:     "require",
+				SSLRootCert: "/nonexistent/cert.crt",
+			},
+			expectError: false,
+		},
+		{
+			name: "Valid require mode with cert",
+			config: Config{
+				SSLMode:     "require",
+				SSLRootCert: certPath,
+			},
+			expectError: false,
+		},
+		{
+			name: "Valid verify-ca mode with cert",
+			config: Config{
+				SSLMode:     "verify-ca",
+				SSLRootCert: certPath,
+			},
+			expectError: false,
+		},
+		{
+			name: "Valid verify-full mode with cert",
+			config: Config{
+				SSLMode:     "verify-full",
+				SSLRootCert: certPath,
+			},
+			expectError: false,
+		},
+		{
+			name: "Missing cert for verify-ca mode",
+			config: Config{
+				SSLMode:     "verify-ca",
+				SSLRootCert: "",
+			},
+			expectError: true,
+		},
+		{
+			name: "Missing cert for verify-full mode",
+			config: Config{
+				SSLMode:     "verify-full",
+				SSLRootCert: "",
+			},
+			expectError: true,
+		},
+		{
+			name: "Invalid SSL mode",
+			config: Config{
+				SSLMode:     "invalid-mode",
+				SSLRootCert: certPath,
+			},
+			expectError: true,
+		},
+		{
+			name: "Non-existent cert file for verify-ca mode",
+			config: Config{
+				SSLMode:     "verify-ca",
 				SSLRootCert: "/nonexistent/cert.crt",
 			},
 			expectError: true,

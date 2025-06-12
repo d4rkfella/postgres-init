@@ -544,7 +544,7 @@ func getDefaultPoolConfig() PoolConfig {
 }
 
 func connectPostgres(ctx context.Context, cfg Config) (DBHandle, error) {
-	const maxAttempts = 10
+	const maxAttempts = 1
 	const baseDelay = 1 * time.Second
 
 	connStr := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s&sslrootcert=%s",
