@@ -86,6 +86,14 @@ type Config struct {
 	SSLRootCert string
 }
 
+type DBHandle interface {
+	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)
+	QueryRow(context.Context, string, ...interface{}) pgx.Row
+	BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
+	Ping(context.Context) error
+	Close()
+}
+
 // ======================
 // Helper Functions
 // ======================
@@ -93,10 +101,11 @@ type Config struct {
 func (c Config) String() string {
 	sslColor := "\033[33m"
 	sslStatus := "⚠️"
-	if c.SSLMode == "verify-ca" || c.SSLMode == "verify-full" {
+	switch c.SSLMode {
+	case "verify-ca", "verify-full":
 		sslColor = "\033[32m"
 		sslStatus = "🔒"
-	} else if c.SSLMode == "disable" {
+	case "disable":
 		sslColor = "\033[31m"
 		sslStatus = "⛔"
 	}
@@ -175,103 +184,88 @@ func printSSLInfo(state tls.ConnectionState, cfg Config) {
 func classifyPostgresError(err error, cfg Config, operation string) *DatabaseError {
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {
-		return nil // Non-PostgreSQL errors handled elsewhere
-	}
-
-	newDBError := func(op, detail, advice string) *DatabaseError {
-		target := cfg.Host
-		switch {
-		case op == "authentication":
-			target = fmt.Sprintf("%s@%s", cfg.SuperUser, target)
-		case strings.Contains(op, "user"):
-			target = cfg.User
-		case strings.Contains(op, "database"):
-			target = cfg.DBName
-		}
-
+		// For non-PostgreSQL errors
 		return &DatabaseError{
-			Operation: op,
-			Detail:    fmt.Sprintf("%s (PGCODE: %s)", detail, pgErr.Code),
-			Target:    target,
-			Code:      pgErr.Code,
-			Advice:    advice,
+			Operation: operation,
+			Detail:    fmt.Sprintf("non-PostgreSQL error: %v", err),
+			Target:    cfg.Host,
+			Code:      "UNKNOWN",
+			Advice:    "Check the error details and system logs",
 			Err:       err,
 		}
 	}
 
+	// At this point, we have a valid PostgreSQL error
+	target := cfg.Host
+	switch {
+	case operation == "authentication":
+		target = fmt.Sprintf("%s@%s", cfg.SuperUser, target)
+	case strings.Contains(operation, "user"):
+		target = cfg.User
+	case strings.Contains(operation, "database"):
+		target = cfg.DBName
+	}
+
+	// Classify the error based on the operation and error code
+	var detail, advice string
 	switch operation {
 	case "connection":
-		return classifyConnectionError(pgErr, newDBError)
-	case "user_management":
-		return classifyUserError(pgErr, newDBError)
-	case "database_management":
-		return classifyDatabaseError(pgErr, newDBError)
-	default:
-		return newDBError("system",
-			fmt.Sprintf("unhandled operation type: %s", operation),
-			"Contact system administrator")
-	}
-}
-
-func classifyConnectionError(pgErr *pgconn.PgError, newDBError func(op, detail, advice string) *DatabaseError) *DatabaseError {
-	switch pgErr.Code {
-	case "28P01":
-		return newDBError("authentication", "invalid password", "Verify password matches the database user")
-	case "28000":
-		if strings.Contains(pgErr.Message, "pg_hba.conf") {
-			if strings.Contains(pgErr.Message, "no encryption") {
-				return newDBError("ssl_configuration", "server requires SSL connection",
-					"Set SSLMode to 'require', 'verify-ca', or 'verify-full'")
+		switch pgErr.Code {
+		case "28P01":
+			detail = fmt.Sprintf("invalid password (SQLSTATE %s)", pgErr.Code)
+			advice = "Verify password matches the database user"
+		case "28000":
+			msg := strings.TrimSpace(pgErr.Message)
+			if msg == "SSL off" || msg == "must be SSL" || msg == "server requires SSL" {
+				detail = fmt.Sprintf("server requires SSL connection (SQLSTATE %s)", pgErr.Code)
+				advice = "Set SSLMode to 'require', 'verify-ca', or 'verify-full'"
+			} else {
+				detail = fmt.Sprintf("connection rejected by pg_hba.conf (SQLSTATE %s)", pgErr.Code)
+				advice = "Check PostgreSQL's pg_hba.conf file"
 			}
-			return newDBError("authorization", "connection rejected by pg_hba.conf",
-				"Check PostgreSQL's pg_hba.conf file")
+		default:
+			detail = fmt.Sprintf("connection failed (SQLSTATE %s)", pgErr.Code)
+			advice = "Check network connectivity and database availability"
 		}
-		return newDBError("authentication", "invalid authorization", "Verify user exists and has proper privileges")
-	case "08000", "08001", "08003", "08004", "08006", "08007":
-		return newDBError("connection", "connection failed",
-			"Check network connectivity and database availability")
-	case "57P03":
-		return newDBError("connection", "database is starting up", "Wait for database to become ready")
+	case "user_management":
+		switch pgErr.Code {
+		case "42710":
+			detail = fmt.Sprintf("role already exists (SQLSTATE %s)", pgErr.Code)
+			advice = "Use a different username or set 'IF NOT EXISTS'"
+		case "42501":
+			detail = fmt.Sprintf("insufficient privileges for user operation (SQLSTATE %s)", pgErr.Code)
+			advice = "Use a superuser account or request proper privileges"
+		default:
+			detail = fmt.Sprintf("user management operation failed (SQLSTATE %s)", pgErr.Code)
+			advice = fmt.Sprintf("Check PostgreSQL error code: %s", pgErr.Code)
+		}
+	case "database_management", "database_creation", "privileges_assignment":
+		switch pgErr.Code {
+		case "42P04":
+			detail = fmt.Sprintf("database already exists (SQLSTATE %s)", pgErr.Code)
+			advice = "Use a different database name or set 'IF NOT EXISTS'"
+		case "42501":
+			detail = fmt.Sprintf("insufficient privileges to create database (SQLSTATE %s)", pgErr.Code)
+			advice = "Use a superuser account or request CREATEDB privileges"
+		case "3D000":
+			detail = fmt.Sprintf("database does not exist (SQLSTATE %s)", pgErr.Code)
+			advice = "Verify database name or create it first"
+		default:
+			detail = fmt.Sprintf("database management operation failed (SQLSTATE %s)", pgErr.Code)
+			advice = fmt.Sprintf("Check PostgreSQL error code: %s", pgErr.Code)
+		}
 	default:
-		return newDBError("connection",
-			"unhandled PostgreSQL connection error",
-			fmt.Sprintf("Consult PostgreSQL documentation for error code: %s", pgErr.Code))
+		detail = fmt.Sprintf("unhandled operation type: %s (SQLSTATE %s)", operation, pgErr.Code)
+		advice = "Contact system administrator"
 	}
-}
 
-func classifyUserError(pgErr *pgconn.PgError, newDBError func(op, detail, advice string) *DatabaseError) *DatabaseError {
-	switch pgErr.Code {
-	case "42710":
-		return newDBError("user_creation", "database user already exists",
-			"Use a different username or set 'IF NOT EXISTS'")
-	case "0LP01":
-		return newDBError("user_configuration", "invalid user configuration",
-			"Check password complexity rules and connection limit settings")
-	case "42501":
-		return newDBError("privileges", "insufficient privileges for user operation",
-			"Use a superuser account or request proper privileges")
-	default:
-		return newDBError("user",
-			"unhandled PostgreSQL user management error",
-			fmt.Sprintf("Consult PostgreSQL documentation for error code: %s", pgErr.Code))
-	}
-}
-
-func classifyDatabaseError(pgErr *pgconn.PgError, newDBError func(op, detail, advice string) *DatabaseError) *DatabaseError {
-	switch pgErr.Code {
-	case "42P04":
-		return newDBError("database_creation", "database already exists",
-			"Use a different database name or set 'IF NOT EXISTS'")
-	case "42501":
-		return newDBError("privileges", "insufficient privileges to create database",
-			"Use a superuser account or request CREATEDB privileges")
-	case "3D000":
-		return newDBError("database_access", "database does not exist",
-			"Verify database name or create it first")
-	default:
-		return newDBError("database",
-			"unhandled PostgreSQL database error",
-			fmt.Sprintf("Consult PostgreSQL documentation for error code: %s", pgErr.Code))
+	return &DatabaseError{
+		Operation: operation,
+		Detail:    detail,
+		Target:    target,
+		Code:      pgErr.Code,
+		Advice:    advice,
+		Err:       err,
 	}
 }
 
@@ -280,9 +274,36 @@ func isFatalError(operation string) bool {
 }
 
 func validatePassword(pass string) error {
-	if len(pass) < 12 {
-		return fmt.Errorf("minimum 12 characters required")
+	policy := getDefaultPasswordPolicy()
+	
+	if len(pass) < policy.MinLength {
+		return fmt.Errorf("password must be at least %d characters long", policy.MinLength)
 	}
+
+	if policy.RequireUpper {
+		if !strings.ContainsAny(pass, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") {
+			return fmt.Errorf("password must contain at least one uppercase letter")
+		}
+	}
+
+	if policy.RequireLower {
+		if !strings.ContainsAny(pass, "abcdefghijklmnopqrstuvwxyz") {
+			return fmt.Errorf("password must contain at least one lowercase letter")
+		}
+	}
+
+	if policy.RequireNumber {
+		if !strings.ContainsAny(pass, "0123456789") {
+			return fmt.Errorf("password must contain at least one number")
+		}
+	}
+
+	if policy.RequireSpecial {
+		if !strings.ContainsAny(pass, "!@#$%^&*()_+-=[]{}|;:,.<>?") {
+			return fmt.Errorf("password must contain at least one special character")
+		}
+	}
+
 	return nil
 }
 
@@ -299,9 +320,12 @@ func highlight(s string) string {
 
 func redactString(s string) string {
 	if s == "" {
-		return `""`
+		return ""
 	}
-	return `"[REDACTED]"`
+	if len(s) == 1 {
+		return "*"
+	}
+	return string(s[0]) + strings.Repeat("*", len(s)-1)
 }
 
 func extractSQLState(err error) string {
@@ -327,61 +351,52 @@ func tlsVersionToString(version uint16) string {
 	case tls.VersionTLS10:
 		return "TLS 1.0"
 	default:
-		return fmt.Sprintf("0x%04X", version)
+		return "unknown"
 	}
 }
 
 func versionSecurityStatus(version uint16) string {
 	switch version {
 	case tls.VersionTLS13:
-		return "\033[32m(Secure)\033[0m"
+		return "(\033[32mSECURE\033[0m)"
 	case tls.VersionTLS12:
-		return "\033[33m(Adequate)\033[0m"
+		return "(\033[33mOK\033[0m)"
+	case tls.VersionTLS10, tls.VersionTLS11:
+		return "(\033[31mINSECURE\033[0m)"
 	default:
-		return "\033[31m(Insecure)\033[0m"
+		return ""
 	}
 }
 
 func parseUserFlags(flags string) (string, error) {
+	if flags == "" {
+		return "", nil
+	}
+	
 	validFlags := make([]string, 0)
 	allowedFlags := map[string]bool{
-		"--login":          true, // LOGIN
-		"--no-login":       true, // NOLOGIN
-		"--createdb":       true, // CREATEDB
-		"--no-createdb":    true, // NOCREATEDB
-		"--createrole":     true, // CREATEROLE
-		"--no-createrole":  true, // NOCREATEROLE
-		"--inherit":        true, // INHERIT
-		"--no-inherit":     true, // NOINHERIT
-		"--replication":    true, // REPLICATION
-		"--no-replication": true, // NOREPLICATION
-		"--superuser":      true, // SUPERUSER
-		"--no-superuser":   true, // NOSUPERUSER
-		"--bypassrls":      true, // BYPASSRLS (PostgreSQL 9.5+)
-		"--no-bypassrls":   true, // NOBYPASSRLS
-
-		"--connection-limit": true, // Needs separate value handling
+		"LOGIN":       true,
+		"NOLOGIN":     true,
+		"CREATEDB":    true,
+		"NOCREATEDB":  true,
+		"CREATEROLE":  true,
+		"NOCREATEROLE":true,
+		"INHERIT":     true,
+		"NOINHERIT":   true,
+		"REPLICATION": true,
+		"NOREPLICATION": true,
+		"SUPERUSER":   true,
+		"NOSUPERUSER": true,
+		"BYPASSRLS":   true,
+		"NOBYPASSRLS": true,
 	}
 
-	for _, flag := range strings.Fields(flags) {
-		parts := strings.SplitN(flag, "=", 2)
-		baseFlag := parts[0]
-
-		if !allowedFlags[baseFlag] {
-			return "", fmt.Errorf("unsupported user flag: %s", baseFlag)
+	for _, flag := range strings.Split(flags, ",") {
+		trimmedFlag := strings.TrimSpace(flag)
+		if !allowedFlags[trimmedFlag] {
+			return "", fmt.Errorf("unsupported user flag: %s", trimmedFlag)
 		}
-
-		if baseFlag == "--connection-limit" {
-			if len(parts) != 2 {
-				return "", fmt.Errorf("connection limit requires a value")
-			}
-			validFlags = append(validFlags, fmt.Sprintf("CONNECTION LIMIT %s", parts[1]))
-			continue
-		}
-
-		pgFlag := strings.ToUpper(strings.TrimPrefix(baseFlag, "--"))
-		pgFlag = strings.ReplaceAll(pgFlag, "-", " ")
-		validFlags = append(validFlags, pgFlag)
+		validFlags = append(validFlags, trimmedFlag)
 	}
 
 	return strings.Join(validFlags, " "), nil
@@ -391,16 +406,66 @@ func parseUserFlags(flags string) (string, error) {
 // Configuration Loading
 // ======================
 
+type PasswordPolicy struct {
+	MinLength     int
+	RequireUpper  bool
+	RequireLower  bool
+	RequireNumber bool
+	RequireSpecial bool
+}
+
+func getDefaultPasswordPolicy() PasswordPolicy {
+	return PasswordPolicy{
+		MinLength:     12,
+		RequireUpper:  true,
+		RequireLower:  true,
+		RequireNumber: true,
+		RequireSpecial: true,
+	}
+}
+
+func validateSSLConfig(cfg Config) error {
+	switch cfg.SSLMode {
+	case "disable":
+		return nil
+	case "require", "verify-ca", "verify-full":
+		if cfg.SSLRootCert == "" {
+			return &ConfigError{
+				Operation: "ssl_configuration",
+				Variable:  "POSTGRES_SSL_ROOTCERT_PATH",
+				Detail:    "SSL root certificate path is required for SSL mode " + cfg.SSLMode,
+				Expected:  "path to SSL root certificate file",
+			}
+		}
+		if _, err := os.Stat(cfg.SSLRootCert); err != nil {
+			return &ConfigError{
+				Operation: "ssl_configuration",
+				Variable:  "POSTGRES_SSL_ROOTCERT_PATH",
+				Detail:    fmt.Sprintf("SSL root certificate file not found: %v", err),
+				Expected:  "valid path to SSL root certificate file",
+			}
+		}
+		return nil
+	default:
+		return &ConfigError{
+			Operation: "ssl_configuration",
+			Variable:  "POSTGRES_SSLMODE",
+			Detail:    "invalid SSL mode",
+			Expected:  "one of: disable, require, verify-ca, verify-full",
+		}
+	}
+}
+
 func loadConfig() (Config, error) {
 	var cfg Config
 
 	required := map[string]*string{
-		"INIT_POSTGRES_SUPER_USER": &cfg.SuperUser,
-		"INIT_POSTGRES_SUPER_PASS": &cfg.SuperPass,
-		"INIT_POSTGRES_USER":       &cfg.User,
-		"INIT_POSTGRES_PASS":       &cfg.UserPass,
-		"INIT_POSTGRES_DBNAME":     &cfg.DBName,
-		"INIT_POSTGRES_HOST":       &cfg.Host,
+		"POSTGRES_SUPER_USER": &cfg.SuperUser,
+		"POSTGRES_SUPER_PASS": &cfg.SuperPass,
+		"POSTGRES_USER":       &cfg.User,
+		"POSTGRES_PASS":       &cfg.UserPass,
+		"POSTGRES_DBNAME":     &cfg.DBName,
+		"POSTGRES_HOST":       &cfg.Host,
 	}
 
 	for key, ptr := range required {
@@ -415,20 +480,44 @@ func loadConfig() (Config, error) {
 		}
 	}
 
-	if err := validatePassword(cfg.UserPass); err != nil {
+	if err := validatePassword(cfg.SuperPass); err != nil {
 		return Config{}, &ConfigError{
 			Operation: "validation",
-			Variable:  "INIT_POSTGRES_PASS",
-			Detail:    "failed to validate application user password",
+			Variable:  "POSTGRES_SUPERPASS",
+			Detail:    "failed to validate superuser password",
 			Expected:  err.Error(),
+			Err:       err,
 		}
 	}
 
-	cfg.Port = getEnvWithDefault("INIT_POSTGRES_PORT", "5432")
-	cfg.SSLMode = getEnvWithDefault("INIT_POSTGRES_SSLMODE", "disable")
+	if err := validatePassword(cfg.UserPass); err != nil {
+		return Config{}, &ConfigError{
+			Operation: "validation",
+			Variable:  "POSTGRES_USER_PASSWORD",
+			Detail:    "failed to validate application user password",
+			Expected:  err.Error(),
+			Err:       err,
+		}
+	}
 
-	cfg.UserFlags = os.Getenv("INIT_POSTGRES_USER_FLAGS")
-	cfg.SSLRootCert = os.Getenv("INIT_POSTGRES_SSLROOTCERT")
+	cfg.Port = getEnvWithDefault("POSTGRES_PORT", "5432")
+	parsedFlags, err := parseUserFlags(getEnvWithDefault("POSTGRES_USER_FLAGS", ""))
+	if err != nil {
+		return Config{}, &ConfigError{
+			Operation: "validation",
+			Variable:  "POSTGRES_USER_FLAGS",
+			Detail:    "invalid user flags provided",
+			Expected:  "a comma-separated list of valid flags (e.g., CREATEDB,LOGIN)",
+			Err:       err,
+		}
+	}
+	cfg.UserFlags = parsedFlags
+	cfg.SSLMode = getEnvWithDefault("POSTGRES_SSLMODE", "disable")
+	cfg.SSLRootCert = os.Getenv("POSTGRES_SSL_ROOTCERT_PATH")
+
+	if err := validateSSLConfig(cfg); err != nil {
+		return Config{}, err
+	}
 
 	return cfg, nil
 }
@@ -437,8 +526,24 @@ func loadConfig() (Config, error) {
 // Database Operations
 // ======================
 
-func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
-	const maxAttempts = 30
+type PoolConfig struct {
+	MaxConns        int32
+	MinConns        int32
+	MaxConnLifetime time.Duration
+	ConnectTimeout  time.Duration
+}
+
+func getDefaultPoolConfig() PoolConfig {
+	return PoolConfig{
+		MaxConns:        3,
+		MinConns:        1,
+		MaxConnLifetime: 5 * time.Minute,
+		ConnectTimeout:  10 * time.Second,
+	}
+}
+
+func connectPostgres(ctx context.Context, cfg Config) (DBHandle, error) {
+	const maxAttempts = 10
 	const baseDelay = 1 * time.Second
 
 	connStr := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s&sslrootcert=%s",
@@ -460,13 +565,25 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 		}
 	}
 
-	parsedConfig.MaxConns = 3
-	parsedConfig.MinConns = 1
-	parsedConfig.MaxConnLifetime = 5 * time.Minute
-	parsedConfig.ConnConfig.ConnectTimeout = 10 * time.Second
+	poolCfg := getDefaultPoolConfig()
+	parsedConfig.MaxConns = poolCfg.MaxConns
+	parsedConfig.MinConns = poolCfg.MinConns
+	parsedConfig.MaxConnLifetime = poolCfg.MaxConnLifetime
+	parsedConfig.ConnConfig.ConnectTimeout = poolCfg.ConnectTimeout
+
+	// Add health check
+	parsedConfig.HealthCheckPeriod = 1 * time.Minute
 
 	pool, err := pgxpool.NewWithConfig(ctx, parsedConfig)
 	if err != nil {
+		// Check if it's an authentication error first
+		if dbErr := classifyPostgresError(err, cfg, "connection"); dbErr != nil {
+			if dbErr.Code == "28P01" || dbErr.Code == "28000" {
+				// Don't retry authentication failures
+				pool.Close()
+				return nil, dbErr
+			}
+		}
 		return nil, classifyPostgresError(err, cfg, "connection")
 	}
 
@@ -477,21 +594,18 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 		}
 	}()
 
-	var (
-		fatalErr *DatabaseError
-		lastErr  error
-	)
-
+	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		err = pool.Ping(ctx)
 		if err == nil {
 			return handleSuccessfulConnection(pool, cfg)
 		}
 
+		// Check if it's an authentication error
 		if dbErr := classifyPostgresError(err, cfg, "connection"); dbErr != nil {
-			if isFatalError(dbErr.Operation) {
-				fatalErr = dbErr
-				break
+			if dbErr.Code == "28P01" || dbErr.Code == "28000" {
+				// Don't retry authentication failures
+				return nil, dbErr
 			}
 			lastErr = dbErr
 		} else {
@@ -512,86 +626,122 @@ func connectPostgres(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 		}
 	}
 
-	if fatalErr != nil {
-		return nil, fatalErr
-	}
-
 	if lastErr != nil {
 		return nil, fmt.Errorf("failed after %d attempts: %w", maxAttempts, lastErr)
 	}
 
-	return nil, fmt.Errorf("connection failed after %d attempts (unknown reason)", maxAttempts)
+	return nil, fmt.Errorf("unexpected error: no error but no successful connection")
 }
-func createUser(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
-	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return classifyPostgresError(err, cfg, "user_management")
-	}
-	defer tx.Rollback(ctx)
 
-	var exists bool
-	err = tx.QueryRow(ctx,
-		"SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1)",
-		cfg.User,
-	).Scan(&exists)
-
-	if err != nil {
-		return classifyPostgresError(err, cfg, "user_management")
-	}
-
-	flags, err := parseUserFlags(cfg.UserFlags)
+func executeInTransaction(ctx context.Context, pool DBHandle, operation string, fn func(tx pgx.Tx) error) error {
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel: pgx.Serializable,
+	})
 	if err != nil {
 		return &DatabaseError{
-			Operation: "user_configuration",
-			Detail:    "unsupported user flag(s) specified",
-			Target:    cfg.UserFlags,
-			Advice:    "Use valid --createdb, --createrole, etc.. flags",
+			Operation: operation,
+			Detail:    "failed to begin transaction",
+			Advice:    "Check database connection and permissions",
 			Err:       err,
 		}
 	}
 
-	var sql string
-	var op string
+	defer func() {
+		if err := tx.Rollback(ctx); err != nil {
+			fmt.Printf("\033[33m⚠️ Failed to rollback transaction: %v\033[0m\n", err)
+		}
+	}()
 
-	if exists {
-		fmt.Printf("\033[32m👤 Updating role %s...\033[0m\n", cfg.User)
-		op = "user_update"
-		sql = fmt.Sprintf("ALTER ROLE %s WITH ENCRYPTED PASSWORD %s %s",
-			pgx.Identifier{cfg.User}.Sanitize(),
-			quoteLiteral(cfg.UserPass),
-			flags)
-	} else {
-		fmt.Printf("\033[32m👤 Creating user %s...\033[0m\n", cfg.User)
-		op = "user_creation"
-		sql = fmt.Sprintf("CREATE ROLE %s LOGIN ENCRYPTED PASSWORD %s %s",
-			pgx.Identifier{cfg.User}.Sanitize(),
-			quoteLiteral(cfg.UserPass),
-			flags)
+	if err := fn(tx); err != nil {
+		return err
 	}
 
-	if _, err = tx.Exec(ctx, sql); err != nil {
-		return classifyPostgresError(err, cfg, op)
-	}
-
-	if err = tx.Commit(ctx); err != nil {
-		return classifyPostgresError(err, cfg, "transaction")
+	if err := tx.Commit(ctx); err != nil {
+		return &DatabaseError{
+			Operation: operation,
+			Detail:    "failed to commit transaction",
+			Advice:    "Check database connection and permissions",
+			Err:       err,
+		}
 	}
 
 	return nil
 }
 
-func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
+func createUser(ctx context.Context, pool DBHandle, cfg Config) error {
+	// Validate user flags first
+	if _, err := parseUserFlags(cfg.UserFlags); err != nil {
+		return &DatabaseError{
+			Operation: "user_validation",
+			Detail:    "invalid user flags",
+			Target:    cfg.User,
+			Advice:    "Use valid flags: CREATEDB, CREATEROLE, LOGIN, SUPERUSER",
+			Err:       err,
+		}
+	}
+
+	return executeInTransaction(ctx, pool, "user_management", func(tx pgx.Tx) error {
+		var exists bool
+		err := tx.QueryRow(ctx,
+			"SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1)",
+			cfg.User,
+		).Scan(&exists)
+
+		if err != nil {
+			return &DatabaseError{
+				Operation: "user_management",
+				Detail:    "failed to check if user exists",
+				Target:    cfg.User,
+				Advice:    "Check database connection and permissions",
+				Err:       err,
+			}
+		}
+
+		var sql string
+		var op string
+
+		if exists {
+			fmt.Printf("\033[32m👤 Updating role %s...\033[0m\n", highlight(cfg.User))
+			op = "user_update"
+			sql = fmt.Sprintf("ALTER ROLE %s WITH ENCRYPTED PASSWORD %s %s",
+				pgx.Identifier{cfg.User}.Sanitize(),
+				quoteLiteral(cfg.UserPass),
+				cfg.UserFlags)
+		} else {
+			fmt.Printf("\033[32m👤 Creating user %s...\033[0m\n", highlight(cfg.User))
+			op = "user_creation"
+			sql = fmt.Sprintf("CREATE ROLE %s LOGIN ENCRYPTED PASSWORD %s %s",
+				pgx.Identifier{cfg.User}.Sanitize(),
+				quoteLiteral(cfg.UserPass),
+				cfg.UserFlags)
+		}
+
+		if _, err = tx.Exec(ctx, sql); err != nil {
+			return classifyPostgresError(err, cfg, op)
+		}
+
+		return nil
+	})
+}
+
+func createDatabase(ctx context.Context, pool DBHandle, cfg Config) error {
 	var exists bool
 	err := pool.QueryRow(ctx,
 		"SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)",
 		cfg.DBName,
 	).Scan(&exists)
 	if err != nil {
-		return classifyPostgresError(err, cfg, "database_management")
+		return &DatabaseError{
+			Operation: "database_management",
+			Detail:    "failed to check if database exists",
+			Target:    cfg.DBName,
+			Advice:    "Check database connection and permissions",
+			Err:       err,
+		}
 	}
 
 	if !exists {
-		fmt.Printf("\033[32m📦 Creating database %s...\033[0m\n", cfg.DBName)
+		fmt.Printf("\033[32m📦 Creating database %s...\033[0m\n", highlight(cfg.DBName))
 		sql := fmt.Sprintf("CREATE DATABASE %s OWNER %s",
 			pgx.Identifier{cfg.DBName}.Sanitize(),
 			pgx.Identifier{cfg.User}.Sanitize())
@@ -602,26 +752,18 @@ func createDatabase(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 		}
 	}
 
-	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return classifyPostgresError(err, cfg, "database_management")
-	}
-	defer tx.Rollback(ctx)
+	return executeInTransaction(ctx, pool, "privileges_assignment", func(tx pgx.Tx) error {
+		fmt.Printf("\033[32m🔑 Granting privileges on %q to %q...\033[0m\n", cfg.DBName, cfg.User)
+		sql := fmt.Sprintf("GRANT ALL PRIVILEGES ON DATABASE %s TO %s",
+			pgx.Identifier{cfg.DBName}.Sanitize(),
+			pgx.Identifier{cfg.User}.Sanitize())
 
-	fmt.Printf("\033[32m🔑 Granting privileges on %q to %q...\033[0m\n", cfg.DBName, cfg.User)
-	sql := fmt.Sprintf("GRANT ALL PRIVILEGES ON DATABASE %s TO %s",
-		pgx.Identifier{cfg.DBName}.Sanitize(),
-		pgx.Identifier{cfg.User}.Sanitize())
+		if _, err = tx.Exec(ctx, sql); err != nil {
+			return classifyPostgresError(err, cfg, "privileges_assignment")
+		}
 
-	if _, err = tx.Exec(ctx, sql); err != nil {
-		return classifyPostgresError(err, cfg, "privileges_assignment")
-	}
-
-	if err = tx.Commit(ctx); err != nil {
-		return classifyPostgresError(err, cfg, "transaction")
-	}
-
-	return nil
+		return nil
+	})
 }
 
 // ======================
