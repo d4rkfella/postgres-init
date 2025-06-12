@@ -426,9 +426,10 @@ func getDefaultPasswordPolicy() PasswordPolicy {
 
 func validateSSLConfig(cfg Config) error {
 	switch cfg.SSLMode {
-	case "disable":
+	case "disable", "require":
+		// No additional validation needed for these modes
 		return nil
-	case "require", "verify-ca", "verify-full":
+	case "verify-ca", "verify-full":
 		if cfg.SSLRootCert == "" {
 			return &ConfigError{
 				Operation: "ssl_configuration",
@@ -449,8 +450,8 @@ func validateSSLConfig(cfg Config) error {
 	default:
 		return &ConfigError{
 			Operation: "ssl_configuration",
-			Variable:  "POSTGRES_SSLMODE",
-			Detail:    "invalid SSL mode",
+			Variable:  "POSTGRES_SSL_MODE",
+			Detail:    "invalid SSL mode: " + cfg.SSLMode,
 			Expected:  "one of: disable, require, verify-ca, verify-full",
 		}
 	}
