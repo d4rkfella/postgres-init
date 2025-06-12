@@ -544,7 +544,7 @@ func getDefaultPoolConfig() PoolConfig {
 }
 
 func connectPostgres(ctx context.Context, cfg Config) (DBHandle, error) {
-	const maxAttempts = 1
+	const maxAttempts = 10
 	const baseDelay = 1 * time.Second
 
 	connStr := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s&sslrootcert=%s",
@@ -647,9 +647,13 @@ func executeInTransaction(ctx context.Context, pool DBHandle, operation string, 
 		}
 	}
 
+	// Set a flag to track if we've committed
+	committed := false
 	defer func() {
-		if err := tx.Rollback(ctx); err != nil {
-			fmt.Printf("\033[33m⚠️ Failed to rollback transaction: %v\033[0m\n", err)
+		if !committed {
+			if err := tx.Rollback(ctx); err != nil && err != pgx.ErrTxClosed {
+				fmt.Printf("\033[33m⚠️ Failed to rollback transaction: %v\033[0m\n", err)
+			}
 		}
 	}()
 
@@ -665,6 +669,7 @@ func executeInTransaction(ctx context.Context, pool DBHandle, operation string, 
 			Err:       err,
 		}
 	}
+	committed = true
 
 	return nil
 }

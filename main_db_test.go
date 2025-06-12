@@ -31,7 +31,6 @@ func TestCreateUser(t *testing.T) {
 		mock.ExpectQuery("SELECT EXISTS").WithArgs(cfg.User).WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
 		mock.ExpectExec("CREATE ROLE").WillReturnResult(pgxmock.NewResult("CREATE ROLE", 1))
 		mock.ExpectCommit()
-		mock.ExpectRollback()
 
 		if err := createUser(ctx, mock, cfg); err != nil {
 			t.Errorf("unexpected error: %v", err)
@@ -53,7 +52,6 @@ func TestCreateUser(t *testing.T) {
 		mock.ExpectQuery("SELECT EXISTS").WithArgs(cfg.User).WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
 		mock.ExpectExec("ALTER ROLE").WillReturnResult(pgxmock.NewResult("ALTER ROLE", 1))
 		mock.ExpectCommit()
-		mock.ExpectRollback()
 
 		if err := createUser(ctx, mock, cfg); err != nil {
 			t.Errorf("unexpected error: %v", err)
@@ -133,7 +131,6 @@ func TestCreateDatabase(t *testing.T) {
 		mock.ExpectBeginTx(pgx.TxOptions{IsoLevel: pgx.Serializable})
 		mock.ExpectExec("GRANT ALL PRIVILEGES").WillReturnResult(pgxmock.NewResult("GRANT", 1))
 		mock.ExpectCommit()
-		mock.ExpectRollback()
 
 		err = createDatabase(ctx, mock, cfg)
 		if err != nil {
@@ -156,7 +153,6 @@ func TestCreateDatabase(t *testing.T) {
 		mock.ExpectBeginTx(pgx.TxOptions{IsoLevel: pgx.Serializable})
 		mock.ExpectExec("GRANT ALL PRIVILEGES").WillReturnResult(pgxmock.NewResult("GRANT", 1))
 		mock.ExpectCommit()
-		mock.ExpectRollback()
 
 		err = createDatabase(ctx, mock, cfg)
 		if err != nil {
