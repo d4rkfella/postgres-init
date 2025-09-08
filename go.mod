@@ -3,7 +3,7 @@ module github.com/d4rkfella/postgres-init
 go 1.24.5
 
 require (
-	github.com/jackc/pgx/v5 v5.7.5
+	github.com/jackc/pgx/v5 v5.7.6
 	github.com/pashagolub/pgxmock/v3 v3.4.0
 )
 
