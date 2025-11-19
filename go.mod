@@ -1,6 +1,6 @@
 module github.com/d4rkfella/postgres-init
 
-go 1.24.5
+go 1.25.4
 
 require (
 	github.com/jackc/pgx/v5 v5.7.6
