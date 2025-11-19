@@ -184,7 +184,6 @@ func printSSLInfo(state tls.ConnectionState, cfg Config) {
 func classifyPostgresError(err error, cfg Config, operation string) *DatabaseError {
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {
-		// For non-PostgreSQL errors
 		return &DatabaseError{
 			Operation: operation,
 			Detail:    fmt.Sprintf("non-PostgreSQL error: %v", err),
@@ -195,7 +194,6 @@ func classifyPostgresError(err error, cfg Config, operation string) *DatabaseErr
 		}
 	}
 
-	// At this point, we have a valid PostgreSQL error
 	target := cfg.Host
 	switch {
 	case operation == "authentication":
@@ -206,7 +204,6 @@ func classifyPostgresError(err error, cfg Config, operation string) *DatabaseErr
 		target = cfg.DBName
 	}
 
-	// Classify the error based on the operation and error code
 	var detail, advice string
 	switch operation {
 	case "connection":
@@ -427,7 +424,6 @@ func getDefaultPasswordPolicy() PasswordPolicy {
 func validateSSLConfig(cfg Config) error {
 	switch cfg.SSLMode {
 	case "disable", "require":
-		// No additional validation needed for these modes
 		return nil
 	case "verify-ca", "verify-full":
 		if cfg.SSLRootCert == "" {
@@ -572,16 +568,12 @@ func connectPostgres(ctx context.Context, cfg Config) (DBHandle, error) {
 	parsedConfig.MaxConnLifetime = poolCfg.MaxConnLifetime
 	parsedConfig.ConnConfig.ConnectTimeout = poolCfg.ConnectTimeout
 
-	// Add health check
 	parsedConfig.HealthCheckPeriod = 1 * time.Minute
 
 	pool, err := pgxpool.NewWithConfig(ctx, parsedConfig)
 	if err != nil {
-		// Check if it's an authentication error first
 		if dbErr := classifyPostgresError(err, cfg, "connection"); dbErr != nil {
 			if dbErr.Code == "28P01" || dbErr.Code == "28000" {
-				// Don't retry authentication failures
-				pool.Close()
 				return nil, dbErr
 			}
 		}
@@ -602,10 +594,8 @@ func connectPostgres(ctx context.Context, cfg Config) (DBHandle, error) {
 			return handleSuccessfulConnection(pool, cfg)
 		}
 
-		// Check if it's an authentication error
 		if dbErr := classifyPostgresError(err, cfg, "connection"); dbErr != nil {
 			if dbErr.Code == "28P01" || dbErr.Code == "28000" {
-				// Don't retry authentication failures
 				return nil, dbErr
 			}
 			lastErr = dbErr
@@ -647,7 +637,6 @@ func executeInTransaction(ctx context.Context, pool DBHandle, operation string, 
 		}
 	}
 
-	// Set a flag to track if we've committed
 	committed := false
 	defer func() {
 		if !committed {
@@ -675,7 +664,6 @@ func executeInTransaction(ctx context.Context, pool DBHandle, operation string, 
 }
 
 func createUser(ctx context.Context, pool DBHandle, cfg Config) error {
-	// Validate user flags first
 	if _, err := parseUserFlags(cfg.UserFlags); err != nil {
 		return &DatabaseError{
 			Operation: "user_validation",
